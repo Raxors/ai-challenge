@@ -1,42 +1,61 @@
 import os
-import sys
 import textwrap
-from openai import OpenAI, APIError, AuthenticationError, RateLimitError
 from dotenv import load_dotenv
+from openai_model import OpenAIModel
+from agent import Agent
 
 load_dotenv()
 
 
+def print_wrapped(text, width):
+    for paragraph in text.split("\n"):
+        if paragraph:
+            print(textwrap.fill(paragraph, width=width))
+        else:
+            print()
+
+
 def main():
-    client = OpenAI()
-
-    if len(sys.argv) > 1:
-        prompt = " ".join(sys.argv[1:])
-    else:
-        prompt = input("Enter your prompt: ")
-
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        width = os.get_terminal_size().columns
+    except OSError:
+        width = 80
+
+    llm = OpenAIModel(model="gpt-4o")
+    agent = Agent(
+        model=llm,
+        max_tokens=1024,
+        system_prompt="You are a helpful assistant. Answer concisely and clearly.",
+    )
+
+    print("Агент запущен. Введите запрос (или 'exit' для выхода, 'reset' для сброса диалога).")
+    print("=" * width)
+
+    while True:
         try:
-            width = os.get_terminal_size().columns
-        except OSError:
-            width = 80
-        text = response.choices[0].message.content
-        for paragraph in text.split("\n"):
-            if paragraph:
-                print(textwrap.fill(paragraph, width=width))
-            else:
-                print()
-    except RateLimitError:
-        print("Error: You exceeded your OpenAI quota. Please check your plan and billing at https://platform.openai.com/settings/organization/billing")
-    except AuthenticationError:
-        print("Error: Invalid API key. Please check your OPENAI_API_KEY in .env file.")
-    except APIError as e:
-        print(f"Error: OpenAI API error - {e.message}")
+            user_input = input("\nВы: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nВыход.")
+            break
+
+        if not user_input:
+            continue
+        if user_input.lower() == "exit":
+            print("Выход.")
+            break
+        if user_input.lower() == "reset":
+            agent.reset()
+            print("[История диалога сброшена]")
+            continue
+
+        result = agent.ask(user_input)
+
+        if "error" in result:
+            print(f"\nОшибка: {result['error']}")
+        else:
+            print()
+            print_wrapped(result["text"], width)
+            print(f"\n  [токены: {result['input_tokens']} in / {result['output_tokens']} out]")
 
 
 if __name__ == "__main__":
