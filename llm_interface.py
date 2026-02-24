@@ -1,6 +1,11 @@
 from abc import ABC, abstractmethod
 
 
+class LLMError(Exception):
+    """Ошибка при вызове LLM."""
+    pass
+
+
 class LLMModel(ABC):
     """Абстрактный интерфейс для любой LLM."""
 
@@ -10,7 +15,8 @@ class LLMModel(ABC):
 
         Возвращает:
             {"text": str, "input_tokens": int, "output_tokens": int, "total_tokens": int}
-        или
-            {"error": str}
+
+        Выбрасывает:
+            LLMError — при любой ошибке API.
         """
         pass

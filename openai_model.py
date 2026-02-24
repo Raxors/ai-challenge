@@ -1,5 +1,6 @@
-from openai import OpenAI, APIError, AuthenticationError, RateLimitError
-from llm_interface import LLMModel
+import httpx
+from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError
+from llm_interface import LLMModel, LLMError
 
 
 class OpenAIModel(LLMModel):
@@ -23,8 +24,14 @@ class OpenAIModel(LLMModel):
                 "total_tokens": response.usage.total_tokens,
             }
         except RateLimitError:
-            return {"error": "Quota exceeded. Check billing: https://platform.openai.com/settings/organization/billing"}
+            raise LLMError("Quota exceeded. Check billing: https://platform.openai.com/settings/organization/billing")
         except AuthenticationError:
-            return {"error": "Invalid API key. Check OPENAI_API_KEY in .env file."}
+            raise LLMError("Invalid API key. Check OPENAI_API_KEY in .env file.")
+        except APIConnectionError:
+            raise LLMError("Connection error. Check your internet connection.")
+        except APITimeoutError:
+            raise LLMError("Request timed out. Try again later.")
         except APIError as e:
-            return {"error": f"API error: {e.message}"}
+            raise LLMError(f"API error: {e.message}")
+        except httpx.ConnectError:
+            raise LLMError("No internet connection.")

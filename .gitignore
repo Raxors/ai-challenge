@@ -1,4 +1,6 @@
 .env
+chat_history.json
+chat_history.db
 
 # Project exclude paths
 /venv/
