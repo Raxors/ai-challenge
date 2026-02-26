@@ -30,10 +30,9 @@ def print_metrics(metrics, width):
     """Выводит статистику токенов после каждого запроса."""
     m = metrics
     bar_len = 30
-    filled = int(bar_len * m["usage_percent"] / 100)
+    filled = min(int(bar_len * m["usage_percent"] / 100), bar_len)
     bar = "#" * filled + "-" * (bar_len - filled)
 
-    # Цвет предупреждения
     if m["usage_percent"] > 90:
         status = "!! CRITICAL"
     elif m["usage_percent"] > 70:
@@ -46,6 +45,8 @@ def print_metrics(metrics, width):
     print(f"    Input tokens:    {m['request_input_tokens']}")
     print(f"    Output tokens:   {m['request_output_tokens']}")
     print(f"    Стоимость:       ${m['request_cost']:.6f}")
+    if m.get("compressed"):
+        print(f"    [Контекст был сжат. Токены на сжатие: {m['compression_tokens']}]")
     print()
     print(f"  История диалога:   {m['history_tokens']} / {m['context_limit']} токенов")
     print(f"    [{bar}] {m['usage_percent']:.1f}% {status}")
@@ -64,14 +65,16 @@ def main():
         model_name=MODEL_NAME,
         max_tokens=1024,
         system_prompt="You are a helpful assistant. Answer concisely and clearly.",
+        compress=True,
+        keep_last=6,
     )
 
     width = get_width()
     msg_count = agent.get_message_count()
     if msg_count > 0:
-        print(f"Агент запущен. Загружена история ({msg_count} сообщений).")
+        print(f"Агент запущен. Загружена история ({msg_count} сообщений). Компрессия: ON")
     else:
-        print("Агент запущен. Новый диалог.")
+        print("Агент запущен. Новый диалог. Компрессия: ON")
     print("Команды: 'exit' — выход, 'reset' — сброс, 'stats' — статистика.")
     print("=" * width)
 
@@ -96,7 +99,10 @@ def main():
                 print(f"\n  Запросов за сессию: {agent.request_number}")
                 print(f"  Input токенов:      {agent.session_input_tokens}")
                 print(f"  Output токенов:     {agent.session_output_tokens}")
+                print(f"  Токены на сжатие:   {agent.compression_tokens}")
                 print(f"  Общая стоимость:    ${agent.session_cost:.6f}")
+                if agent.compressor and agent.compressor.summary:
+                    print(f"  Текущее summary:    {agent.compressor.summary[:100]}...")
                 continue
 
             try:
