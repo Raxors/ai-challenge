@@ -41,15 +41,15 @@ class Agent:
         available = context_limit - history_tokens - self.max_tokens
 
         # Проверяем переполнение
-        # if available < 0:
-        #     self.history.pop()
-        #     self.store.remove_last()
-        #     raise LLMError(
-        #         f"Context overflow! History: {history_tokens} tokens, "
-        #         f"limit: {context_limit}, "
-        #         f"available for response: {available}. "
-        #         f"Use 'reset' to clear the dialog."
-        #     )
+        if available < 0:
+            self.history.pop()
+            self.store.remove_last()
+            raise LLMError(
+                f"Context overflow! History: {history_tokens} tokens, "
+                f"limit: {context_limit}, "
+                f"available for response: {available}. "
+                f"Use 'reset' to clear the dialog."
+            )
 
         try:
             result = self.model.generate(self.history, max_tokens=self.max_tokens)
