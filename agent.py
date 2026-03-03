@@ -1,18 +1,10 @@
-from llm_interface import LLMModel, LLMError
-from history_store import HistoryStore
+from core import LLMModel, LLMError
+from storage import HistoryStore
 from token_counter import TokenCounter
-from context_strategies import (
-    ContextStrategy,
-    SlidingWindowStrategy,
-    StickyFactsStrategy,
-    BranchingStrategy,
-)
+from strategies import create_strategy, get_strategy_names
 
 
 class Agent:
-    """Агент с историей диалога, подсчётом токенов и переключаемыми стратегиями контекста."""
-
-    STRATEGIES = ["sliding_window", "sticky_facts", "branching"]
 
     def __init__(self, model: LLMModel, model_name="gpt-4o", max_tokens=1024,
                  system_prompt=None, db_path="chat_history.db",
@@ -23,13 +15,11 @@ class Agent:
         self.store = HistoryStore(db_path)
         self.counter = TokenCounter(model_name)
 
-        # Статистика за сессию
         self.session_input_tokens = 0
         self.session_output_tokens = 0
         self.session_cost = 0.0
         self.request_number = 0
 
-        # Загружаем сохранённую историю или создаём новую
         saved = self.store.load()
         if saved:
             self.history = saved
@@ -39,41 +29,26 @@ class Agent:
                 self.history.append({"role": "system", "content": system_prompt})
                 self.store.add("system", system_prompt)
 
-        # Инициализируем стратегию
-        self.strategy = self._create_strategy(strategy_name, window_size)
-
-    def _create_strategy(self, name, window_size=10) -> ContextStrategy:
-        if name == "sliding_window":
-            return SlidingWindowStrategy(window_size=window_size)
-        elif name == "sticky_facts":
-            return StickyFactsStrategy(model=self.model, window_size=window_size)
-        elif name == "branching":
-            return BranchingStrategy()
-        else:
-            raise ValueError(f"Unknown strategy: {name}. Use: {self.STRATEGIES}")
+        self.strategy_name = strategy_name
+        self.strategy = create_strategy(strategy_name, model=self.model, window_size=window_size)
 
     def set_strategy(self, name, window_size=10):
-        """Переключает стратегию управления контекстом."""
-        self.strategy = self._create_strategy(name, window_size)
+        self.strategy_name = name
+        self.strategy = create_strategy(name, model=self.model, window_size=window_size)
         return self.strategy.get_name()
 
     def ask(self, user_message):
-        """Отправляет сообщение в LLM. Возвращает результат с метриками токенов."""
         self.history.append({"role": "user", "content": user_message})
         self.store.add("user", user_message)
 
-        # Уведомляем стратегию о новом сообщении
         self.strategy.on_user_message(self.history, user_message)
 
-        # Стратегия подготавливает сообщения
         messages_to_send = self.strategy.prepare_messages(self.history)
 
-        # Считаем токены ДО запроса
         history_tokens = self.counter.count_messages(messages_to_send)
         context_limit = self.counter.get_limit()
         available = context_limit - history_tokens - self.max_tokens
 
-        # Проверяем переполнение
         if available < 0:
             self.history.pop()
             self.store.remove_last()
@@ -94,17 +69,14 @@ class Agent:
         self.history.append({"role": "assistant", "content": result["text"]})
         self.store.add("assistant", result["text"])
 
-        # Уведомляем стратегию об ответе
         self.strategy.on_assistant_message(self.history, result["text"])
 
-        # Обновляем статистику
         self.request_number += 1
         self.session_input_tokens += result["input_tokens"]
         self.session_output_tokens += result["output_tokens"]
         request_cost = self.counter.calc_cost(result["input_tokens"], result["output_tokens"])
         self.session_cost += request_cost
 
-        # Метрики после запроса
         sent_tokens = self.counter.count_messages(messages_to_send)
         full_history_tokens = self.counter.count_messages(self.history)
         usage_percent = (sent_tokens / context_limit) * 100
@@ -136,13 +108,12 @@ class Agent:
         if self.system_prompt:
             self.history.append({"role": "system", "content": self.system_prompt})
             self.store.add("system", self.system_prompt)
-        # Пересоздаём стратегию для сброса состояния
-        self.strategy = self._create_strategy(
-            self.strategy.get_name().split("(")[0].lower().replace(" ", "_"),
-        )
+
+        self.strategy.reset()
 
     def get_message_count(self):
         return self.store.count("user")
 
     def close(self):
+        self.strategy.close()
         self.store.close()

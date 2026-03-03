@@ -2,10 +2,10 @@ import os
 import textwrap
 
 from dotenv import load_dotenv
-from openai_model import OpenAIModel
+from llm import OpenAIModel
 from agent import Agent
-from context_strategies import BranchingStrategy
-from llm_interface import LLMError
+from core import LLMError
+from strategies import get_strategy_names
 
 load_dotenv()
 
@@ -51,13 +51,18 @@ def print_metrics(metrics, width):
     print(f"  Отправлено в LLM: {m['sent_tokens']} токенов  |  Полная история: {m['full_history_tokens']} токенов")
     print(f"    [{bar}] {m['usage_percent']:.1f}% {status}")
 
-    # Дополнительная инфо от стратегии
     if "dropped_messages" in si:
         print(f"    Отброшено сообщений: {si['dropped_messages']}")
     if "facts_count" in si:
         print(f"    Фактов в памяти: {si['facts_count']}  |  Токены на извлечение: {si.get('facts_extraction_tokens', 0)}")
-    if "branches" in si:
+    if "branches" in si and "current_branch" in si:
         print(f"    Ветка: {si.get('current_branch', 'main')}  |  Чекпоинты: {si.get('checkpoints', [])}")
+    if "current_task" in si:
+        wm_keys = si.get("working_memory_keys", [])
+        print(f"    Задача: {si['current_task']}  |  Working keys: {len(wm_keys)}  |  Long-term: {si.get('long_term_count', 0)} фактов")
+        print(f"    Токены на классификацию: {si.get('classification_tokens', 0)}")
+        if si.get("task_change_suggested"):
+            print(f"    ⚡ Обнаружена смена задачи! Используйте 'task <name>' для переключения.")
 
     print()
     print(f"  Итого за сессию:")
@@ -73,71 +78,25 @@ def print_help():
   exit              — выход
   reset             — сброс диалога
   stats             — статистика сессии
-  strategy <name>   — сменить стратегию (sliding_window / sticky_facts / branching)
+  strategy <name>   — сменить стратегию (sliding_window / sticky_facts / branching / memory_layers)
   facts             — показать текущие факты (для sticky_facts)
   checkpoint <name> — сохранить чекпоинт (для branching)
   branch <name>     — создать ветку от текущего состояния (для branching)
   branch <name> from <checkpoint> — создать ветку от чекпоинта
   switch <name>     — переключиться на ветку (или 'main')
   branches          — список веток и чекпоинтов
+
+  Команды Memory Layers (для стратегии memory_layers):
+  memory            — показать все слои памяти
+  memory short      — показать short-term (последние сообщения)
+  memory working    — показать рабочую память текущей задачи
+  memory long       — показать долгосрочную память
+  task <name>       — переключиться на задачу (создаёт новую если не существует)
+  tasks             — список всех задач
+  forget            — полный сброс памяти (working + long-term)
+
   help              — эта справка
 """)
-
-
-def handle_branching_commands(agent, cmd, args):
-    """Обрабатывает команды ветвления. Возвращает True если команда обработана."""
-    strategy = agent.strategy
-    if not isinstance(strategy, BranchingStrategy):
-        print("[Команда доступна только в стратегии branching]")
-        return True
-
-    if cmd == "checkpoint":
-        if not args:
-            print("[Укажите имя чекпоинта: checkpoint <name>]")
-            return True
-        strategy.create_checkpoint(args[0], agent.history)
-        print(f"[Чекпоинт '{args[0]}' сохранён ({len(agent.history)} сообщений)]")
-        return True
-
-    elif cmd == "branch":
-        if not args:
-            print("[Укажите имя ветки: branch <name> [from <checkpoint>]]")
-            return True
-        branch_name = args[0]
-        if len(args) >= 3 and args[1] == "from":
-            cp_name = args[2]
-            if cp_name not in strategy.checkpoints:
-                print(f"[Чекпоинт '{cp_name}' не найден]")
-                return True
-            strategy.create_branch(branch_name, checkpoint_name=cp_name)
-            print(f"[Ветка '{branch_name}' создана от чекпоинта '{cp_name}']")
-        else:
-            strategy.create_branch(branch_name, history=agent.history)
-            print(f"[Ветка '{branch_name}' создана от текущего состояния]")
-        return True
-
-    elif cmd == "switch":
-        if not args:
-            print("[Укажите имя ветки: switch <name>]")
-            return True
-        if strategy.switch_branch(args[0]):
-            print(f"[Переключено на ветку '{args[0]}']")
-        else:
-            print(f"[Ветка '{args[0]}' не найдена]")
-        return True
-
-    elif cmd == "branches":
-        print("\n  Чекпоинты:")
-        for name, info in strategy.list_checkpoints().items():
-            print(f"    {name}: {info}")
-        print("\n  Ветки:")
-        for name, info in strategy.list_branches().items():
-            marker = " <--" if (name == (strategy.current_branch or "main")) else ""
-            print(f"    {name}: {info}{marker}")
-        print()
-        return True
-
-    return False
 
 
 def main():
@@ -166,10 +125,13 @@ def main():
     try:
         while True:
             try:
-                branch_info = ""
-                if isinstance(agent.strategy, BranchingStrategy):
-                    branch = agent.strategy.current_branch or "main"
-                    branch_info = f" [{branch}]"
+                # Show notifications from strategy
+                for note in agent.strategy.get_notifications():
+                    print(f"\n  {note}")
+
+                # Build prompt with strategy info
+                prompt_info = agent.strategy.get_prompt_info()
+                branch_info = f" [{prompt_info}]" if prompt_info else ""
                 user_input = input(f"\nВы{branch_info}: ").strip()
             except (KeyboardInterrupt, EOFError):
                 print("\nВыход.")
@@ -206,12 +168,17 @@ def main():
                     print(f"  Факты: {len(si['facts'])} ключей")
                 if "facts_extraction_tokens" in si:
                     print(f"  Токены на факты:    {si['facts_extraction_tokens']}")
+                if "current_task" in si:
+                    print(f"  Текущая задача:     {si['current_task']}")
+                    print(f"  Working memory:     {len(si.get('working_memory_keys', []))} ключей")
+                    print(f"  Long-term memory:   {si.get('long_term_count', 0)} фактов")
+                    print(f"  Токены на класс.:   {si.get('classification_tokens', 0)}")
                 continue
 
             if cmd == "strategy":
                 if not args:
                     print(f"[Текущая: {agent.strategy.get_name()}]")
-                    print(f"[Доступные: {', '.join(Agent.STRATEGIES)}]")
+                    print(f"[Доступные: {', '.join(get_strategy_names())}]")
                     continue
                 try:
                     name = agent.set_strategy(args[0], window_size=10)
@@ -233,11 +200,11 @@ def main():
                     print("[Факты доступны только в стратегии sticky_facts]")
                 continue
 
-            if cmd in ("checkpoint", "branch", "switch", "branches"):
-                handle_branching_commands(agent, cmd, args)
+            # Delegate strategy-specific commands
+            if agent.strategy.handle_command(cmd, args, agent):
                 continue
 
-            # Обычное сообщение
+            # Regular message
             try:
                 result = agent.ask(user_input)
             except LLMError as e:

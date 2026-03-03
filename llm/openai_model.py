@@ -1,10 +1,9 @@
 import httpx
 from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError
-from llm_interface import LLMModel, LLMError
+from core import LLMModel, LLMError
 
 
 class OpenAIModel(LLMModel):
-    """Реализация интерфейса LLMModel для OpenAI API."""
 
     def __init__(self, model="gpt-4o"):
         self.client = OpenAI()

@@ -1,15 +1,12 @@
-import sqlite3
+from core import BaseStore
 
 
-class HistoryStore:
-    """Сохраняет и загружает историю диалога в SQLite."""
+class HistoryStore(BaseStore):
 
     def __init__(self, db_path="chat_history.db"):
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path)
-        self._init_db()
+        super().__init__(db_path)
 
-    def _init_db(self):
+    def _init_tables(self):
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,14 +18,12 @@ class HistoryStore:
         self.conn.commit()
 
     def load(self):
-        """Загружает всю историю из базы."""
         rows = self.conn.execute(
             "SELECT role, content FROM messages ORDER BY id"
         ).fetchall()
         return [{"role": role, "content": content} for role, content in rows]
 
     def add(self, role, content):
-        """Добавляет одно сообщение в базу."""
         self.conn.execute(
             "INSERT INTO messages (role, content) VALUES (?, ?)",
             (role, content),
@@ -36,19 +31,16 @@ class HistoryStore:
         self.conn.commit()
 
     def remove_last(self):
-        """Удаляет последнее сообщение из базы."""
         self.conn.execute(
             "DELETE FROM messages WHERE id = (SELECT MAX(id) FROM messages)"
         )
         self.conn.commit()
 
     def clear(self):
-        """Удаляет всю историю."""
         self.conn.execute("DELETE FROM messages")
         self.conn.commit()
 
     def count(self, role=None):
-        """Возвращает количество сообщений. Если role указан — только для этой роли."""
         if role:
             row = self.conn.execute(
                 "SELECT COUNT(*) FROM messages WHERE role = ?", (role,)
@@ -56,7 +48,3 @@ class HistoryStore:
         else:
             row = self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()
         return row[0]
-
-    def close(self):
-        """Закрывает соединение с базой."""
-        self.conn.close()
