@@ -1,4 +1,4 @@
-from core import LLMModel, LLMError
+from core import LLMModel, LLMError, UserProfile
 from storage import HistoryStore
 from token_counter import TokenCounter
 from strategies import create_strategy, get_strategy_names
@@ -8,7 +8,8 @@ class Agent:
 
     def __init__(self, model: LLMModel, model_name="gpt-4o", max_tokens=1024,
                  system_prompt=None, db_path="chat_history.db",
-                 strategy_name="sliding_window", window_size=10):
+                 strategy_name="sliding_window", window_size=10,
+                 profile_path="user_profile.json"):
         self.model = model
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt
@@ -29,6 +30,9 @@ class Agent:
                 self.history.append({"role": "system", "content": system_prompt})
                 self.store.add("system", system_prompt)
 
+        self.profile_path = profile_path
+        self.profile = UserProfile.load(profile_path)
+
         self.strategy_name = strategy_name
         self.strategy = create_strategy(strategy_name, model=self.model, window_size=window_size)
 
@@ -44,6 +48,11 @@ class Agent:
         self.strategy.on_user_message(self.history, user_message)
 
         messages_to_send = self.strategy.prepare_messages(self.history)
+
+        if not self.profile.is_empty():
+            profile_msg = {"role": "system", "content": self.profile.to_prompt()}
+            insert_pos = 1 if messages_to_send and messages_to_send[0]["role"] == "system" else 0
+            messages_to_send.insert(insert_pos, profile_msg)
 
         history_tokens = self.counter.count_messages(messages_to_send)
         context_limit = self.counter.get_limit()
@@ -110,6 +119,9 @@ class Agent:
             self.store.add("system", self.system_prompt)
 
         self.strategy.reset()
+
+    def reload_profile(self):
+        self.profile = UserProfile.load(self.profile_path)
 
     def get_message_count(self):
         return self.store.count("user")

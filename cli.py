@@ -95,6 +95,12 @@ def print_help():
   tasks             — список всех задач
   forget            — полный сброс памяти (working + long-term)
 
+  Профиль пользователя:
+  profile           — показать текущий профиль
+  profile show      — то же самое
+  profile set <field> <value> — установить поле (например: profile set response_language English)
+  profile clear     — очистить все поля профиля
+
   help              — эта справка
 """)
 
@@ -140,9 +146,10 @@ def main():
             if not user_input:
                 continue
 
-            parts = user_input.lower().split()
-            cmd = parts[0]
-            args = parts[1:]
+            parts = user_input.split()
+            cmd = parts[0].lower()
+            args = [a.lower() for a in parts[1:]]
+            args_raw = parts[1:]  # preserve original case for values
 
             if cmd == "exit":
                 print("Выход.")
@@ -198,6 +205,34 @@ def main():
                         print("[Фактов пока нет]")
                 else:
                     print("[Факты доступны только в стратегии sticky_facts]")
+                continue
+
+            if cmd == "profile":
+                if not args or args[0] == "show":
+                    if agent.profile.is_empty():
+                        print("[Профиль пуст. Используйте 'profile set <field> <value>'.]")
+                    else:
+                        print(f"\n  {agent.profile.to_prompt()}")
+                    print(f"\n  Доступные поля: {', '.join(agent.profile.get_settable_fields())}")
+                elif args[0] == "clear":
+                    agent.profile.clear()
+                    agent.profile.save(agent.profile_path)
+                    print("[Профиль очищен.]")
+                elif args[0] == "set":
+                    if len(args_raw) < 3:
+                        print("[Использование: profile set <field> <value>]")
+                        print(f"  Доступные поля: {', '.join(agent.profile.get_settable_fields())}")
+                    else:
+                        field_name = args[1]  # lowercase for field name
+                        value = " ".join(args_raw[2:])  # preserve case for value
+                        if agent.profile.set_field(field_name, value):
+                            agent.profile.save(agent.profile_path)
+                            print(f"[Профиль обновлён: {field_name} = {value}]")
+                        else:
+                            print(f"[Неизвестное поле: {field_name}]")
+                            print(f"  Доступные поля: {', '.join(agent.profile.get_settable_fields())}")
+                else:
+                    print("[Неизвестная подкоманда. Используйте: profile, profile show, profile set, profile clear]")
                 continue
 
             # Delegate strategy-specific commands
