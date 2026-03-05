@@ -41,6 +41,7 @@ def print_metrics(metrics, width):
         status = "OK"
 
     si = m.get("strategy_info", {})
+    ts = m.get("task_state")
 
     print("-" * width)
     print(f"  Запрос #{m['request_number']}  |  Стратегия: {si.get('strategy', '?')}")
@@ -63,6 +64,11 @@ def print_metrics(metrics, width):
         print(f"    Токены на классификацию: {si.get('classification_tokens', 0)}")
         if si.get("task_change_suggested"):
             print(f"    ⚡ Обнаружена смена задачи! Используйте 'task <name>' для переключения.")
+
+    if ts:
+        print(f"    Задача (FSM): {ts['task_name']}  |  Фаза: {ts['phase']}")
+        if ts.get("current_step"):
+            print(f"    Шаг: {ts['current_step']}")
 
     print()
     print(f"  Итого за сессию:")
@@ -100,6 +106,17 @@ def print_help():
   profile show      — то же самое
   profile set <field> <value> — установить поле (например: profile set response_language English)
   profile clear     — очистить все поля профиля
+
+  Task State Machine (управление жизненным циклом задачи):
+  state             — показать текущее состояние задачи
+  state start <name> — начать новую задачу (фаза: planning)
+  state advance     — перейти к следующей фазе
+  state phase <name> — перейти к конкретной фазе (planning/execution/validation/done)
+  state step <text> [| expected action] — установить текущий шаг
+  state pause       — приостановить задачу
+  state resume      — возобновить задачу
+  state clear       — очистить состояние задачи
+  state history     — показать историю переходов
 
   help              — эта справка
 """)
@@ -233,6 +250,88 @@ def main():
                             print(f"  Доступные поля: {', '.join(agent.profile.get_settable_fields())}")
                 else:
                     print("[Неизвестная подкоманда. Используйте: profile, profile show, profile set, profile clear]")
+                continue
+
+            if cmd == "state":
+                if not args or args[0] == "show":
+                    if agent.task_state.is_empty():
+                        print("[Нет активной задачи. Используйте 'state start <name>'.]")
+                    else:
+                        print(f"\n  {agent.task_state.to_prompt()}")
+                elif args[0] == "start":
+                    if len(args_raw) < 2:
+                        print("[Использование: state start <task name>]")
+                    else:
+                        task_name = " ".join(args_raw[1:])
+                        agent.task_state.start(task_name)
+                        agent.save_task_state()
+                        print(f"[Задача '{task_name}' начата. Фаза: planning]")
+                elif args[0] == "advance":
+                    try:
+                        new_phase = agent.task_state.advance()
+                        agent.save_task_state()
+                        print(f"[Фаза изменена на: {new_phase}]")
+                    except ValueError as e:
+                        print(f"[Ошибка: {e}]")
+                elif args[0] == "phase":
+                    if len(args) < 2:
+                        print("[Использование: state phase <name>]")
+                        print(f"  Доступные переходы: {agent.task_state.get_valid_transitions()}")
+                    else:
+                        try:
+                            new_phase = agent.task_state.transition(args[1])
+                            agent.save_task_state()
+                            print(f"[Фаза изменена на: {new_phase}]")
+                        except ValueError as e:
+                            print(f"[Ошибка: {e}]")
+                elif args[0] == "step":
+                    if len(args_raw) < 2:
+                        print("[Использование: state step <text> [| expected action]]")
+                    else:
+                        step_text = " ".join(args_raw[1:])
+                        if "|" in step_text:
+                            parts_step = step_text.split("|", 1)
+                            step = parts_step[0].strip()
+                            expected = parts_step[1].strip()
+                        else:
+                            step = step_text
+                            expected = ""
+                        agent.task_state.set_step(step, expected)
+                        agent.save_task_state()
+                        msg = f"[Шаг: {step}]"
+                        if expected:
+                            msg += f" [Ожидаемое действие: {expected}]"
+                        print(msg)
+                elif args[0] == "pause":
+                    try:
+                        agent.task_state.pause()
+                        agent.save_task_state()
+                        print("[Задача приостановлена.]")
+                    except ValueError as e:
+                        print(f"[Ошибка: {e}]")
+                elif args[0] == "resume":
+                    try:
+                        restored = agent.task_state.resume()
+                        agent.save_task_state()
+                        print(f"[Задача возобновлена. Фаза: {restored}]")
+                    except ValueError as e:
+                        print(f"[Ошибка: {e}]")
+                elif args[0] == "clear":
+                    agent.task_state.clear()
+                    agent.save_task_state()
+                    print("[Состояние задачи очищено.]")
+                elif args[0] == "history":
+                    if agent.task_state.is_empty() and not agent.task_state.history:
+                        print("[Нет истории переходов.]")
+                    else:
+                        print(f"\n  История переходов (задача: {agent.task_state.task_name}):")
+                        for i, entry in enumerate(agent.task_state.history):
+                            step_info = f" — {entry['step']}" if entry.get("step") else ""
+                            print(f"    {i+1}. {entry['phase']}{step_info}  ({entry['timestamp']})")
+                        if not agent.task_state.history:
+                            print("    (пусто)")
+                else:
+                    print("[Неизвестная подкоманда. Используйте 'help' для списка команд.]")
                 continue
 
             # Delegate strategy-specific commands

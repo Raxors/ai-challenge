@@ -1,4 +1,4 @@
-from core import LLMModel, LLMError, UserProfile
+from core import LLMModel, LLMError, UserProfile, TaskState
 from storage import HistoryStore
 from token_counter import TokenCounter
 from strategies import create_strategy, get_strategy_names
@@ -9,7 +9,8 @@ class Agent:
     def __init__(self, model: LLMModel, model_name="gpt-4o", max_tokens=1024,
                  system_prompt=None, db_path="chat_history.db",
                  strategy_name="sliding_window", window_size=10,
-                 profile_path="user_profile.json"):
+                 profile_path="user_profile.json",
+                 task_state_path="task_state.json"):
         self.model = model
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt
@@ -33,6 +34,9 @@ class Agent:
         self.profile_path = profile_path
         self.profile = UserProfile.load(profile_path)
 
+        self.task_state_path = task_state_path
+        self.task_state = TaskState.load(task_state_path)
+
         self.strategy_name = strategy_name
         self.strategy = create_strategy(strategy_name, model=self.model, window_size=window_size)
 
@@ -53,6 +57,16 @@ class Agent:
             profile_msg = {"role": "system", "content": self.profile.to_prompt()}
             insert_pos = 1 if messages_to_send and messages_to_send[0]["role"] == "system" else 0
             messages_to_send.insert(insert_pos, profile_msg)
+
+        if not self.task_state.is_empty():
+            state_msg = {"role": "system", "content": self.task_state.to_prompt()}
+            insert_pos = 0
+            for i, m in enumerate(messages_to_send):
+                if m["role"] == "system":
+                    insert_pos = i + 1
+                else:
+                    break
+            messages_to_send.insert(insert_pos, state_msg)
 
         history_tokens = self.counter.count_messages(messages_to_send)
         context_limit = self.counter.get_limit()
@@ -103,6 +117,11 @@ class Agent:
             "session_total_output": self.session_output_tokens,
             "session_total_cost": self.session_cost,
             "strategy_info": self.strategy.get_state_info(),
+            "task_state": {
+                "task_name": self.task_state.task_name,
+                "phase": self.task_state.phase,
+                "current_step": self.task_state.current_step,
+            } if not self.task_state.is_empty() else None,
         }
 
         return result
@@ -122,6 +141,12 @@ class Agent:
 
     def reload_profile(self):
         self.profile = UserProfile.load(self.profile_path)
+
+    def save_task_state(self):
+        self.task_state.save(self.task_state_path)
+
+    def reload_task_state(self):
+        self.task_state = TaskState.load(self.task_state_path)
 
     def get_message_count(self):
         return self.store.count("user")
