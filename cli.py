@@ -65,6 +65,10 @@ def print_metrics(metrics, width):
         if si.get("task_change_suggested"):
             print(f"    ⚡ Обнаружена смена задачи! Используйте 'task <name>' для переключения.")
 
+    inv_count = m.get("invariants_count", 0)
+    if inv_count:
+        print(f"    Инварианты: {inv_count}")
+
     if ts:
         print(f"    Задача (FSM): {ts['task_name']}  |  Фаза: {ts['phase']}")
         if ts.get("current_step"):
@@ -117,6 +121,13 @@ def print_help():
   state resume      — возобновить задачу
   state clear       — очистить состояние задачи
   state history     — показать историю переходов
+
+  Инварианты проекта (жёсткие ограничения):
+  invariant         — показать все инварианты
+  invariant show    — то же самое
+  invariant add <категория> <правило> — добавить инвариант
+  invariant remove <id> — удалить инвариант по ID
+  invariant clear   — удалить все инварианты
 
   help              — эта справка
 """)
@@ -332,6 +343,44 @@ def main():
                             print("    (пусто)")
                 else:
                     print("[Неизвестная подкоманда. Используйте 'help' для списка команд.]")
+                continue
+
+            if cmd == "invariant":
+                if not args or args[0] == "show":
+                    if agent.invariants.is_empty():
+                        print("[Инвариантов нет. Используйте 'invariant add <категория> <правило>'.]")
+                    else:
+                        print("\n  Инварианты проекта:")
+                        for inv in agent.invariants.get_all():
+                            print(f"    #{inv['id']} [{inv['category']}] {inv['rule']}")
+                elif args[0] == "add":
+                    if len(args_raw) < 3:
+                        print("[Использование: invariant add <категория> <правило>]")
+                    else:
+                        category = args_raw[1]
+                        rule = " ".join(args_raw[2:])
+                        inv_id = agent.invariants.add(category, rule)
+                        agent.save_invariants()
+                        print(f"[Инвариант #{inv_id} добавлен: [{category}] {rule}]")
+                elif args[0] == "remove":
+                    if len(args) < 2:
+                        print("[Использование: invariant remove <id>]")
+                    else:
+                        try:
+                            inv_id = int(args[1])
+                            if agent.invariants.remove(inv_id):
+                                agent.save_invariants()
+                                print(f"[Инвариант #{inv_id} удалён.]")
+                            else:
+                                print(f"[Инвариант #{inv_id} не найден.]")
+                        except ValueError:
+                            print("[ID должен быть числом.]")
+                elif args[0] == "clear":
+                    agent.invariants.clear()
+                    agent.save_invariants()
+                    print("[Все инварианты удалены.]")
+                else:
+                    print("[Неизвестная подкоманда. Используйте: invariant, invariant show, invariant add, invariant remove, invariant clear]")
                 continue
 
             # Delegate strategy-specific commands

@@ -1,4 +1,4 @@
-from core import LLMModel, LLMError, UserProfile, TaskState
+from core import LLMModel, LLMError, UserProfile, TaskState, ProjectInvariants
 from storage import HistoryStore
 from token_counter import TokenCounter
 from strategies import create_strategy, get_strategy_names
@@ -10,7 +10,8 @@ class Agent:
                  system_prompt=None, db_path="chat_history.db",
                  strategy_name="sliding_window", window_size=10,
                  profile_path="user_profile.json",
-                 task_state_path="task_state.json"):
+                 task_state_path="task_state.json",
+                 invariants_path="invariants.json"):
         self.model = model
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt
@@ -36,6 +37,9 @@ class Agent:
 
         self.task_state_path = task_state_path
         self.task_state = TaskState.load(task_state_path)
+
+        self.invariants_path = invariants_path
+        self.invariants = ProjectInvariants.load(invariants_path)
 
         self.strategy_name = strategy_name
         self.strategy = create_strategy(strategy_name, model=self.model, window_size=window_size)
@@ -67,6 +71,16 @@ class Agent:
                 else:
                     break
             messages_to_send.insert(insert_pos, state_msg)
+
+        if not self.invariants.is_empty():
+            inv_msg = {"role": "system", "content": self.invariants.to_prompt()}
+            insert_pos = 0
+            for i, m in enumerate(messages_to_send):
+                if m["role"] == "system":
+                    insert_pos = i + 1
+                else:
+                    break
+            messages_to_send.insert(insert_pos, inv_msg)
 
         history_tokens = self.counter.count_messages(messages_to_send)
         context_limit = self.counter.get_limit()
@@ -122,6 +136,7 @@ class Agent:
                 "phase": self.task_state.phase,
                 "current_step": self.task_state.current_step,
             } if not self.task_state.is_empty() else None,
+            "invariants_count": len(self.invariants.invariants) if not self.invariants.is_empty() else 0,
         }
 
         return result
@@ -141,6 +156,12 @@ class Agent:
 
     def reload_profile(self):
         self.profile = UserProfile.load(self.profile_path)
+
+    def save_invariants(self):
+        self.invariants.save(self.invariants_path)
+
+    def reload_invariants(self):
+        self.invariants = ProjectInvariants.load(self.invariants_path)
 
     def save_task_state(self):
         self.task_state.save(self.task_state_path)
