@@ -15,8 +15,8 @@ from pathlib import Path
 PHASES = ["planning", "execution", "validation", "done"]
 
 TRANSITIONS = {
-    "planning":   ["execution", "paused", "done"],
-    "execution":  ["validation", "planning", "paused", "done"],
+    "planning":   ["execution", "paused"],
+    "execution":  ["validation", "planning", "paused"],
     "validation": ["done", "execution", "paused"],
     "done":       ["planning"],
     "paused":     [],  # special: resume() handles exit
@@ -28,6 +28,17 @@ PHASE_DESCRIPTIONS = {
     "validation": "Verifying and testing the results",
     "done":       "Task completed",
     "paused":     "Task is paused",
+}
+
+PHASE_INSTRUCTIONS = {
+    "planning":   "Focus on PLANNING only. Discuss the approach, architecture, and steps. "
+                  "Do NOT write implementation code yet — planning must be completed first.",
+    "execution":  "Focus on IMPLEMENTATION. Follow the plan. "
+                  "Do NOT skip to final results — validation is required after implementation.",
+    "validation": "Focus on VERIFICATION and testing. Check the implementation against requirements. "
+                  "Only after successful validation can the task be marked as done.",
+    "done":       "Task is completed. Summarize results if needed.",
+    "paused":     "Task is PAUSED. Do NOT repeat previous explanations when resumed.",
 }
 
 
@@ -95,12 +106,12 @@ class TaskState:
                 progress_parts.append(p)
         lines.append(f"  Progress: {' -> '.join(progress_parts)}")
 
-        lines.append(f"  INSTRUCTION: Stay focused on the '{self.phase}' phase.")
+        instruction = PHASE_INSTRUCTIONS.get(self.phase, f"Stay focused on the '{self.phase}' phase.")
+        lines.append(f"  INSTRUCTION: {instruction}")
 
-        if self.phase == "paused":
-            lines.append(
-                "  NOTE: Task is PAUSED. Do NOT repeat previous explanations when resumed."
-            )
+        valid = TRANSITIONS.get(self.phase, [])
+        if valid:
+            lines.append(f"  Allowed next phases: {', '.join(valid)}")
 
         return "\n".join(lines)
 

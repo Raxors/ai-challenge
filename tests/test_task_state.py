@@ -97,23 +97,32 @@ def test_phase1_unit():
     except ValueError as e:
         results.append(check("advance() от done → ValueError", "Already at 'done'" in str(e)))
 
-    # Тест 1.5: Невалидный переход
-    section("1.5 Невалидный переход")
+    # Тест 1.5: Невалидные переходы (нельзя перепрыгнуть этапы)
+    section("1.5 Невалидные переходы")
     ts = TaskState()
     ts.start("Тест переходов")
     try:
-        ts.transition("done")  # planning → done is valid
-        results.append(check("planning → done разрешён", ts.phase == "done"))
+        ts.transition("done")  # planning → done запрещён (нельзя финал без валидации)
+        results.append(check("planning → done запрещён", False))
     except ValueError:
-        results.append(check("planning → done разрешён", False))
+        results.append(check("planning → done запрещён", True))
 
     ts2 = TaskState()
     ts2.start("Тест переходов 2")
     try:
-        ts2.transition("validation")  # planning → validation is NOT valid
+        ts2.transition("validation")  # planning → validation запрещён (нельзя без execution)
         results.append(check("planning → validation запрещён", False))
     except ValueError:
         results.append(check("planning → validation запрещён", True))
+
+    ts3 = TaskState()
+    ts3.start("Тест переходов 3")
+    ts3.advance()  # → execution
+    try:
+        ts3.transition("done")  # execution → done запрещён (нельзя финал без валидации)
+        results.append(check("execution → done запрещён", False))
+    except ValueError:
+        results.append(check("execution → done запрещён", True))
 
     # Тест 1.6: Откат execution → planning
     section("1.6 Backtracking: execution → planning")
@@ -228,6 +237,10 @@ def test_phase1_unit():
     results.append(check("'Реализовать CRUD' в prompt",
                           "Реализовать CRUD" in prompt))
     results.append(check("'INSTRUCTION' в prompt", "INSTRUCTION" in prompt))
+    results.append(check("'Do NOT skip' в prompt (phase constraint)",
+                          "Do NOT skip" in prompt))
+    results.append(check("'Allowed next phases' в prompt",
+                          "Allowed next phases" in prompt))
 
     # Тест 1.15: to_prompt() для состояния paused
     section("1.15 to_prompt() для paused состояния")
@@ -251,12 +264,12 @@ def test_phase1_unit():
     ts = TaskState()
     ts.start("Тест переходов")
     valid = ts.get_valid_transitions()
-    results.append(check("planning → [execution, paused, done]", valid == ["execution", "paused", "done"]))
+    results.append(check("planning → [execution, paused]", valid == ["execution", "paused"]))
 
     ts.advance()  # → execution
     valid = ts.get_valid_transitions()
-    results.append(check("execution → [validation, planning, paused, done]",
-                          valid == ["validation", "planning", "paused", "done"]))
+    results.append(check("execution → [validation, planning, paused]",
+                          valid == ["validation", "planning", "paused"]))
 
     # Тест 1.18: Отслеживание истории
     section("1.18 История переходов")
@@ -398,6 +411,32 @@ def test_phase2_llm():
         except LLMError as e:
             print(f"  Ошибка LLM: {e}")
             results.append(check("Запрос после resume", False))
+        finally:
+            agent.close()
+
+        # Тест 2.5: LLM не пишет код в фазе planning
+        section("2.5 LLM соблюдает ограничения фазы planning")
+        agent = make_agent(tmp_dir, "phase_constraint")
+        agent.task_state.start("Создать REST API для задач", "Определить архитектуру", "Описать структуру эндпоинтов")
+        agent.save_task_state()
+
+        try:
+            result = agent.ask(
+                "Напиши код реализации POST /tasks эндпоинта на FastAPI прямо сейчас. "
+                "Мне не нужен план, просто код."
+            )
+            response = result["text"].lower()
+            print(f"  Ответ (первые 300): {result['text'][:300]}...")
+
+            # LLM должен упомянуть, что сейчас фаза планирования
+            mentions_planning = any(word in response for word in [
+                "plan", "planning", "планиров", "фаз", "phase",
+                "этап", "сначала", "first", "before",
+            ])
+            results.append(check("LLM упоминает фазу planning при запросе кода", mentions_planning))
+        except LLMError as e:
+            print(f"  Ошибка LLM: {e}")
+            results.append(check("LLM соблюдает ограничения planning", False))
         finally:
             agent.close()
 
