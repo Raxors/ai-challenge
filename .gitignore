@@ -6,3 +6,4 @@ chat_history.db
 /venv/
 
 .idea
+/mcp_servers.json

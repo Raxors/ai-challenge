@@ -39,7 +39,13 @@ class TokenCounter:
         for msg in messages:
             total += 4  # каждое сообщение: <im_start>{role}\n{content}<im_end>\n
             total += self.count_text(msg["role"])
-            total += self.count_text(msg["content"])
+            content = msg.get("content")
+            if content:
+                total += self.count_text(content)
+            if "tool_calls" in msg:
+                for tc in msg["tool_calls"]:
+                    total += self.count_text(tc["function"]["name"])
+                    total += self.count_text(tc["function"]["arguments"])
         total += 2  # <im_start>assistant
         return total
 

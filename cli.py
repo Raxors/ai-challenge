@@ -69,6 +69,11 @@ def print_metrics(metrics, width):
     if inv_count:
         print(f"    Инварианты: {inv_count}")
 
+    mcp_tools = m.get("mcp_tools", 0)
+    mcp_iters = m.get("mcp_tool_iterations", 0)
+    if mcp_tools:
+        print(f"    MCP инструменты: {mcp_tools}  |  Вызовов инструментов: {mcp_iters}")
+
     if ts:
         print(f"    Задача (FSM): {ts['task_name']}  |  Фаза: {ts['phase']}")
         if ts.get("current_step"):
@@ -129,6 +134,17 @@ def print_help():
   invariant remove <id> — удалить инвариант по ID
   invariant clear   — удалить все инварианты
 
+  MCP серверы (подключение внешних инструментов):
+  mcp               — показать все серверы и статус
+  mcp show          — то же самое
+  mcp add <name> <cmd...> — добавить stdio-сервер (например: mcp add myserver python server.py)
+  mcp add-sse <name> <url> — добавить SSE-сервер (например: mcp add-sse remote http://host:8080/sse)
+  mcp remove <name>  — удалить сервер
+  mcp connect        — подключиться ко всем серверам
+  mcp connect <name> — подключиться к конкретному серверу
+  mcp disconnect <name> — отключиться от сервера
+  mcp tools          — показать все доступные инструменты
+
   help              — эта справка
 """)
 
@@ -145,6 +161,18 @@ def main():
         strategy_name=default_strategy,
         window_size=10,
     )
+
+    # Auto-connect MCP servers
+    mcp_servers = agent.mcp_hub.get_server_names()
+    if mcp_servers:
+        errors = agent.mcp_hub.connect_all()
+        connected = agent.mcp_hub.get_connected_names()
+        total_tools = len(agent.mcp_hub.list_all_tools())
+        if connected:
+            print(f"MCP: подключено {len(connected)} серверов, {total_tools} инструментов.")
+        if errors:
+            for name, err in errors.items():
+                print(f"MCP ошибка '{name}': {err}")
 
     width = get_width()
     msg_count = agent.get_message_count()
@@ -381,6 +409,91 @@ def main():
                     print("[Все инварианты удалены.]")
                 else:
                     print("[Неизвестная подкоманда. Используйте: invariant, invariant show, invariant add, invariant remove, invariant clear]")
+                continue
+
+            if cmd == "mcp":
+                if not args or args[0] == "show":
+                    configured = agent.mcp_hub.get_server_names()
+                    connected = agent.mcp_hub.get_connected_names()
+                    if not configured:
+                        print("[Нет сконфигурированных MCP-серверов. Используйте 'mcp add <name> <cmd...>'.]")
+                    else:
+                        print("\n  MCP серверы:")
+                        for name in configured:
+                            status = "подключён" if name in connected else "отключён"
+                            info = agent.mcp_hub.get_server_info(name)
+                            if info:
+                                print(f"    {name}: {info['transport']} — {status} ({info['tools_count']} инструментов)")
+                            else:
+                                cfg = agent.mcp_hub._config["servers"].get(name, {})
+                                transport = cfg.get("transport", "stdio")
+                                print(f"    {name}: {transport} — {status}")
+                elif args[0] == "add":
+                    if len(args_raw) < 3:
+                        print("[Использование: mcp add <name> <command...>]")
+                        print("  Пример: mcp add myserver python server.py")
+                    else:
+                        name = args_raw[1]
+                        command = args_raw[2:]
+                        agent.mcp_hub.add_stdio_server(name, command)
+                        print(f"[Сервер '{name}' добавлен (stdio). Используйте 'mcp connect' для подключения.]")
+                elif args[0] == "add-sse":
+                    if len(args_raw) < 3:
+                        print("[Использование: mcp add-sse <name> <url>]")
+                        print("  Пример: mcp add-sse remote http://localhost:8080/sse")
+                    else:
+                        name = args_raw[1]
+                        url = args_raw[2]
+                        agent.mcp_hub.add_sse_server(name, url)
+                        print(f"[Сервер '{name}' добавлен (SSE: {url}). Используйте 'mcp connect' для подключения.]")
+                elif args[0] == "remove":
+                    if len(args_raw) < 2:
+                        print("[Использование: mcp remove <name>]")
+                    else:
+                        name = args_raw[1]
+                        if agent.mcp_hub.remove_server(name):
+                            print(f"[Сервер '{name}' удалён.]")
+                        else:
+                            print(f"[Сервер '{name}' не найден.]")
+                elif args[0] == "connect":
+                    if len(args_raw) >= 2:
+                        name = args_raw[1]
+                        try:
+                            agent.mcp_hub.connect(name)
+                            info = agent.mcp_hub.get_server_info(name)
+                            tools_count = info["tools_count"] if info else 0
+                            print(f"[Подключён к '{name}'. Инструментов: {tools_count}]")
+                        except Exception as e:
+                            print(f"[Ошибка подключения к '{name}': {e}]")
+                    else:
+                        errors = agent.mcp_hub.connect_all()
+                        connected = agent.mcp_hub.get_connected_names()
+                        if connected:
+                            total_tools = len(agent.mcp_hub.list_all_tools())
+                            print(f"[Подключено серверов: {len(connected)}. Всего инструментов: {total_tools}]")
+                        if errors:
+                            for name, err in errors.items():
+                                print(f"  Ошибка '{name}': {err}")
+                        if not connected and not errors:
+                            print("[Нет серверов для подключения. Используйте 'mcp add'.]")
+                elif args[0] == "disconnect":
+                    if len(args_raw) < 2:
+                        print("[Использование: mcp disconnect <name>]")
+                    else:
+                        name = args_raw[1]
+                        agent.mcp_hub.disconnect(name)
+                        print(f"[Сервер '{name}' отключён.]")
+                elif args[0] == "tools":
+                    tools = agent.mcp_hub.list_all_tools()
+                    if not tools:
+                        print("[Нет доступных инструментов. Подключите серверы: 'mcp connect'.]")
+                    else:
+                        print(f"\n  MCP инструменты ({len(tools)}):")
+                        for t in tools:
+                            desc = t["description"][:60] + "..." if len(t["description"]) > 60 else t["description"]
+                            print(f"    [{t['server']}] {t['name']} — {desc}")
+                else:
+                    print("[Неизвестная подкоманда. Используйте 'help' для списка команд.]")
                 continue
 
             # Delegate strategy-specific commands

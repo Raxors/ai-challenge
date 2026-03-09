@@ -1,7 +1,10 @@
+import json
+
 from core import LLMModel, LLMError, UserProfile, TaskState, ProjectInvariants
 from storage import HistoryStore
 from token_counter import TokenCounter
 from strategies import create_strategy, get_strategy_names
+from mcp_hub import MCPHub
 
 
 class Agent:
@@ -11,7 +14,8 @@ class Agent:
                  strategy_name="sliding_window", window_size=10,
                  profile_path="user_profile.json",
                  task_state_path="task_state.json",
-                 invariants_path="invariants.json"):
+                 invariants_path="invariants.json",
+                 mcp_config_path="mcp_servers.json"):
         self.model = model
         self.max_tokens = max_tokens
         self.system_prompt = system_prompt
@@ -40,6 +44,8 @@ class Agent:
 
         self.invariants_path = invariants_path
         self.invariants = ProjectInvariants.load(invariants_path)
+
+        self.mcp_hub = MCPHub(config_path=mcp_config_path)
 
         self.strategy_name = strategy_name
         self.strategy = create_strategy(strategy_name, model=self.model, window_size=window_size)
@@ -96,12 +102,92 @@ class Agent:
                 f"Use 'reset' to clear the dialog."
             )
 
-        try:
-            result = self.model.generate(messages_to_send, max_tokens=self.max_tokens)
-        except LLMError:
-            self.history.pop()
-            self.store.remove_last()
-            raise
+        # MCP tools для OpenAI function calling
+        openai_tools = None
+        if not self.mcp_hub.is_empty():
+            openai_tools = self.mcp_hub.get_openai_tools() or None
+
+        # Tool use loop: LLM может вызывать инструменты многократно
+        total_input_tokens = 0
+        total_output_tokens = 0
+        tool_iterations = 0
+        max_tool_iterations = 10
+
+        while True:
+            try:
+                result = self.model.generate(
+                    messages_to_send,
+                    max_tokens=self.max_tokens,
+                    tools=openai_tools,
+                )
+            except LLMError:
+                if tool_iterations == 0:
+                    self.history.pop()
+                    self.store.remove_last()
+                raise
+
+            total_input_tokens += result["input_tokens"]
+            total_output_tokens += result["output_tokens"]
+
+            # Если нет tool_calls — обычный текстовый ответ, выходим
+            if "tool_calls" not in result or not result["tool_calls"]:
+                break
+
+            tool_iterations += 1
+            if tool_iterations > max_tool_iterations:
+                if not result["text"]:
+                    result["text"] = "[Превышен лимит итераций вызова инструментов]"
+                break
+
+            # Добавить assistant message с tool_calls в контекст
+            assistant_msg = {
+                "role": "assistant",
+                "content": result.get("text") or None,
+                "tool_calls": [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": tc["function"]["arguments"],
+                        },
+                    }
+                    for tc in result["tool_calls"]
+                ],
+            }
+            messages_to_send.append(assistant_msg)
+
+            # Выполнить каждый tool call и добавить результат
+            for tc in result["tool_calls"]:
+                func_name = tc["function"]["name"]
+                try:
+                    args = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+
+                server_name, tool_name = self.mcp_hub.resolve_tool_call(func_name)
+
+                try:
+                    tool_result = self.mcp_hub.call_tool(server_name, tool_name, args)
+                    content = tool_result.get("content", [])
+                    if content:
+                        text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
+                        tool_text = "\n".join(text_parts)
+                    else:
+                        tool_text = json.dumps(tool_result, ensure_ascii=False)
+                except Exception as e:
+                    tool_text = f"Error: {e}"
+
+                messages_to_send.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": tool_text,
+                })
+
+        # Подменяем токены на суммарные за все итерации
+        result["input_tokens"] = total_input_tokens
+        result["output_tokens"] = total_output_tokens
+        result["total_tokens"] = total_input_tokens + total_output_tokens
 
         self.history.append({"role": "assistant", "content": result["text"]})
         self.store.add("assistant", result["text"])
@@ -137,6 +223,8 @@ class Agent:
                 "current_step": self.task_state.current_step,
             } if not self.task_state.is_empty() else None,
             "invariants_count": len(self.invariants.invariants) if not self.invariants.is_empty() else 0,
+            "mcp_tools": len(openai_tools) if openai_tools else 0,
+            "mcp_tool_iterations": tool_iterations,
         }
 
         return result
@@ -173,5 +261,6 @@ class Agent:
         return self.store.count("user")
 
     def close(self):
+        self.mcp_hub.close_all()
         self.strategy.close()
         self.store.close()
