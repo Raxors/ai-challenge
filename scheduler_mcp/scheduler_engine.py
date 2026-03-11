@@ -25,6 +25,7 @@ class SchedulerEngine:
         self._thread = None
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA auto_vacuum = FULL")
         self._init_db()
 
     def _init_db(self):
@@ -124,6 +125,15 @@ class SchedulerEngine:
                     self._conn.execute(
                         "UPDATE tasks SET next_run = ? WHERE id = ?",
                         (new_next, task_id),
+                    )
+                    # Удаляем старые доставленные результаты, оставляя последние 100
+                    self._conn.execute(
+                        "DELETE FROM task_results WHERE task_id = ? AND delivered = 1 "
+                        "AND id NOT IN ("
+                        "  SELECT id FROM task_results WHERE task_id = ? "
+                        "  ORDER BY id DESC LIMIT 100"
+                        ")",
+                        (task_id, task_id),
                     )
                 self._conn.commit()
 
