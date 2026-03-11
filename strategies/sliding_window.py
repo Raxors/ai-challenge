@@ -14,8 +14,9 @@ class SlidingWindowStrategy(ContextStrategy):
     def prepare_messages(self, history: list) -> list:
         system_msgs, recent = split_messages(history, self.window_size)
         non_system = [m for m in history if m["role"] != "system"]
-        if len(non_system) > self.window_size:
-            self.dropped_count += len(non_system) - self.window_size
+        dropped = max(0, len(non_system) - self.window_size)
+        if dropped > self.dropped_count:
+            self.dropped_count = dropped
         return system_msgs + recent
 
     def reset(self):

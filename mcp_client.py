@@ -290,19 +290,26 @@ class SSEMCPClient:
             message["params"] = params
         self._send(message)
 
+        stashed = []
         deadline = time.time() + 30
-        while time.time() < deadline:
-            try:
-                response = self._response_queue.get(timeout=1)
-                if response.get("id") == req_id:
-                    if "error" in response:
-                        err = response["error"]
-                        raise RuntimeError(
-                            f"MCP error [{err.get('code')}]: {err.get('message')}"
-                        )
-                    return response.get("result", {})
-            except queue.Empty:
-                continue
+        try:
+            while time.time() < deadline:
+                try:
+                    response = self._response_queue.get(timeout=1)
+                    if response.get("id") == req_id:
+                        if "error" in response:
+                            err = response["error"]
+                            raise RuntimeError(
+                                f"MCP error [{err.get('code')}]: {err.get('message')}"
+                            )
+                        return response.get("result", {})
+                    else:
+                        stashed.append(response)
+                except queue.Empty:
+                    continue
+        finally:
+            for item in stashed:
+                self._response_queue.put(item)
 
         raise TimeoutError(f"Timeout waiting for response to request {req_id}")
 

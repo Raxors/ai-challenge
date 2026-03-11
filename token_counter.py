@@ -42,6 +42,11 @@ class TokenCounter:
             content = msg.get("content")
             if content:
                 total += self.count_text(content)
+            # tool role messages have tool_call_id and name
+            if "tool_call_id" in msg:
+                total += self.count_text(msg["tool_call_id"])
+            if "name" in msg:
+                total += self.count_text(msg["name"])
             if "tool_calls" in msg:
                 for tc in msg["tool_calls"]:
                     total += self.count_text(tc["function"]["name"])

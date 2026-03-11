@@ -208,6 +208,10 @@ class MCPHub:
         """True если нет подключённых серверов."""
         return len(self.servers) == 0
 
+    def get_server_config(self, name):
+        """Конфигурация сервера (из файла конфига)."""
+        return self._config["servers"].get(name, {})
+
     def get_server_info(self, name):
         """Информация о подключённом сервере."""
         if name not in self.servers:
