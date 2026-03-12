@@ -1,11 +1,30 @@
 import os
+import sys
 import textwrap
+import time
 
 from dotenv import load_dotenv
 from llm import OpenAIModel
 from agent import Agent
 from core import LLMError
 from strategies import get_strategy_names
+
+try:
+    import fcntl as _fcntl
+except ImportError:
+    _fcntl = None
+
+try:
+    import select
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ImportError:
+    _HAS_TERMIOS = False
+
+NOTIFICATION_POLL_INTERVAL = 10  # секунд между проверками
+
+_input_history = []
 
 load_dotenv()
 
@@ -149,6 +168,189 @@ def print_help():
 """)
 
 
+def _can_use_cbreak():
+    """Проверить, поддерживает ли терминал cbreak-режим."""
+    if not _HAS_TERMIOS or not sys.stdin.isatty():
+        return False
+    try:
+        termios.tcgetattr(sys.stdin.fileno())
+        return True
+    except (termios.error, OSError):
+        return False
+
+
+def _input_cbreak(prompt, agent, poll_interval):
+    """Ввод через cbreak + select: уведомления не ломают строку ввода.
+
+    Поддерживает: UTF-8, Backspace, Enter, Ctrl+C/D/U,
+    стрелки вверх/вниз для истории.
+    """
+    global _input_history
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    buf = []
+    history_pos = len(_input_history)
+    saved_buf = None
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+
+    try:
+        tty.setcbreak(fd)
+        while True:
+            if select.select([sys.stdin], [], [], poll_interval)[0]:
+                raw = os.read(fd, 256)
+                if not raw:
+                    raise EOFError
+
+                # Escape-последовательности (стрелки и т.п.)
+                if raw[0] == 27:
+                    if len(raw) >= 3 and raw[1] == 91:
+                        arrow = raw[2]
+                        if arrow == 65:  # Up
+                            if history_pos > 0:
+                                if history_pos == len(_input_history):
+                                    saved_buf = "".join(buf)
+                                history_pos -= 1
+                                buf[:] = list(_input_history[history_pos])
+                                sys.stdout.write("\r\033[K" + prompt + "".join(buf))
+                                sys.stdout.flush()
+                        elif arrow == 66:  # Down
+                            if history_pos < len(_input_history):
+                                history_pos += 1
+                                if history_pos == len(_input_history):
+                                    buf[:] = list(saved_buf or "")
+                                else:
+                                    buf[:] = list(_input_history[history_pos])
+                                sys.stdout.write("\r\033[K" + prompt + "".join(buf))
+                                sys.stdout.flush()
+                    continue
+
+                # Декодируем UTF-8
+                text = raw.decode("utf-8", errors="ignore")
+                for ch in text:
+                    c = ord(ch)
+                    if c in (10, 13):  # Enter
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        result = "".join(buf)
+                        if result.strip():
+                            _input_history.append(result)
+                        return result
+                    elif c in (127, 8):  # Backspace
+                        if buf:
+                            buf.pop()
+                            sys.stdout.write("\b \b")
+                    elif c == 3:  # Ctrl+C
+                        raise KeyboardInterrupt
+                    elif c == 4:  # Ctrl+D
+                        if not buf:
+                            raise EOFError
+                    elif c == 21:  # Ctrl+U — очистить строку
+                        sys.stdout.write("\r\033[K" + prompt)
+                        buf.clear()
+                    elif c >= 32:  # Печатный символ
+                        buf.append(ch)
+                        sys.stdout.write(ch)
+                sys.stdout.flush()
+            else:
+                # Таймаут — проверяем уведомления
+                try:
+                    notes = agent.check_scheduler_notifications()
+                except Exception:
+                    notes = []
+                if notes:
+                    current = "".join(buf)
+                    sys.stdout.write("\r\033[K")
+                    _print_notifications(notes)
+                    sys.stdout.write(prompt + current)
+                    sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def _print_notifications(notes):
+    """Отформатировать и вывести уведомления планировщика."""
+    for note in notes:
+        for line in note.split("\n"):
+            sys.stdout.write(f"  [Scheduler] {line}\n")
+        sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def _input_fallback(prompt, agent, poll_interval):
+    """Fallback: однопоточный ввод через fcntl non-blocking + polling уведомлений.
+
+    В cooked-режиме терминал сам буферизует и отображает (echo) символы.
+    Мы периодически проверяем, появилась ли готовая строка (после Enter),
+    а между проверками опрашиваем уведомления планировщика.
+    Текст пользователя не теряется — терминал хранит и отображает его сам.
+    """
+    # Синхронная проверка перед показом prompt
+    try:
+        notes = agent.check_scheduler_notifications()
+    except Exception:
+        notes = []
+    if notes:
+        _print_notifications(notes)
+
+    # Если fcntl недоступен (Windows) — обычный input()
+    if _fcntl is None:
+        return input(prompt)
+
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    fd = sys.stdin.fileno()
+    old_flags = _fcntl.fcntl(fd, _fcntl.F_GETFL)
+    _fcntl.fcntl(fd, _fcntl.F_SETFL, old_flags | os.O_NONBLOCK)
+
+    line_buf = b""
+    last_check = time.time()
+    try:
+        while True:
+            # Попытка прочитать данные (неблокирующая)
+            try:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    raise EOFError
+                line_buf += chunk
+                if b"\n" in line_buf:
+                    text = line_buf.decode("utf-8", errors="ignore")
+                    return text.split("\n", 1)[0]
+            except BlockingIOError:
+                pass
+
+            # Периодическая проверка уведомлений
+            now = time.time()
+            if now - last_check >= poll_interval:
+                last_check = now
+                try:
+                    notes = agent.check_scheduler_notifications()
+                except Exception:
+                    notes = []
+                if notes:
+                    # Перенос на новую строку, чтобы не стирать набранный текст
+                    sys.stdout.write("\n")
+                    _print_notifications(notes)
+                    sys.stdout.write(prompt)
+                    sys.stdout.flush()
+
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        raise
+    finally:
+        _fcntl.fcntl(fd, _fcntl.F_SETFL, old_flags)
+
+
+def _input_with_notifications(prompt, agent, poll_interval):
+    """Ввод с проверкой уведомлений. Выбирает лучший доступный режим."""
+    if _can_use_cbreak():
+        return _input_cbreak(prompt, agent, poll_interval)
+    return _input_fallback(prompt, agent, poll_interval)
+
+
 def main():
     llm = OpenAIModel(model=MODEL_NAME)
 
@@ -194,7 +396,11 @@ def main():
                 # Build prompt with strategy info
                 prompt_info = agent.strategy.get_prompt_info()
                 branch_info = f" [{prompt_info}]" if prompt_info else ""
-                user_input = input(f"\nВы{branch_info}: ").strip()
+                prompt_str = f"Вы{branch_info}: "
+                print()  # отступ перед prompt
+                user_input = _input_with_notifications(
+                    prompt_str, agent, NOTIFICATION_POLL_INTERVAL,
+                ).strip()
             except (KeyboardInterrupt, EOFError):
                 print("\nВыход.")
                 break
@@ -425,7 +631,7 @@ def main():
                             if info:
                                 print(f"    {name}: {info['transport']} — {status} ({info['tools_count']} инструментов)")
                             else:
-                                cfg = agent.mcp_hub._config["servers"].get(name, {})
+                                cfg = agent.mcp_hub.get_server_config(name)
                                 transport = cfg.get("transport", "stdio")
                                 print(f"    {name}: {transport} — {status}")
                 elif args[0] == "add":

@@ -55,6 +55,39 @@ class Agent:
         self.strategy = create_strategy(name, model=self.model, window_size=window_size)
         return self.strategy.get_name()
 
+    @staticmethod
+    def _find_system_end(messages):
+        """Find the index after the last leading system message."""
+        pos = 0
+        for i, m in enumerate(messages):
+            if m["role"] == "system":
+                pos = i + 1
+            else:
+                break
+        return pos
+
+    def _inject_system_context(self, messages):
+        """Inject profile, task state, and invariants as system messages.
+
+        Insertion order (after existing system messages):
+          1. Profile
+          2. Task State
+          3. Invariants (last = highest recency weight)
+        """
+        extras = []
+        if not self.profile.is_empty():
+            extras.append({"role": "system", "content": self.profile.to_prompt()})
+        if not self.task_state.is_empty():
+            extras.append({"role": "system", "content": self.task_state.to_prompt()})
+        if not self.invariants.is_empty():
+            extras.append({"role": "system", "content": self.invariants.to_prompt()})
+
+        if not extras:
+            return messages
+
+        insert_pos = self._find_system_end(messages)
+        return messages[:insert_pos] + extras + messages[insert_pos:]
+
     def ask(self, user_message):
         self.history.append({"role": "user", "content": user_message})
         self.store.add("user", user_message)
@@ -62,31 +95,7 @@ class Agent:
         self.strategy.on_user_message(self.history, user_message)
 
         messages_to_send = self.strategy.prepare_messages(self.history)
-
-        if not self.profile.is_empty():
-            profile_msg = {"role": "system", "content": self.profile.to_prompt()}
-            insert_pos = 1 if messages_to_send and messages_to_send[0]["role"] == "system" else 0
-            messages_to_send.insert(insert_pos, profile_msg)
-
-        if not self.task_state.is_empty():
-            state_msg = {"role": "system", "content": self.task_state.to_prompt()}
-            insert_pos = 0
-            for i, m in enumerate(messages_to_send):
-                if m["role"] == "system":
-                    insert_pos = i + 1
-                else:
-                    break
-            messages_to_send.insert(insert_pos, state_msg)
-
-        if not self.invariants.is_empty():
-            inv_msg = {"role": "system", "content": self.invariants.to_prompt()}
-            insert_pos = 0
-            for i, m in enumerate(messages_to_send):
-                if m["role"] == "system":
-                    insert_pos = i + 1
-                else:
-                    break
-            messages_to_send.insert(insert_pos, inv_msg)
+        messages_to_send = self._inject_system_context(messages_to_send)
 
         history_tokens = self.counter.count_messages(messages_to_send)
         context_limit = self.counter.get_limit()
@@ -256,6 +265,66 @@ class Agent:
 
     def reload_task_state(self):
         self.task_state = TaskState.load(self.task_state_path)
+
+    def check_scheduler_notifications(self):
+        """Проверить недоставленные уведомления планировщика."""
+        try:
+            if "scheduler" not in self.mcp_hub.get_connected_names():
+                return []
+            tool_result = self.mcp_hub.call_tool("scheduler", "scheduler_check_notifications", {})
+            content = tool_result.get("content", [])
+            if not content:
+                return []
+            text = content[0].get("text", "[]")
+            notifications = json.loads(text)
+            result = []
+            for n in notifications:
+                task_name = n.get("task_name", "?")
+                r = n.get("result", {})
+                if isinstance(r, str):
+                    try:
+                        r = json.loads(r)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if not isinstance(r, dict):
+                    result.append(f'"{task_name}": {r}')
+                    continue
+                ntype = r.get("type", "")
+                message = r.get("message", "")
+                lines = [f'"{task_name}": {message}']
+                # Сводка по задачам если есть
+                stats = r.get("stats")
+                tasks_summary = r.get("tasks_summary")
+                if stats:
+                    lines.append(
+                        f"  Задачи: {stats['active']} активных / "
+                        f"{stats['total']} всего / {stats['fired']} выполнено"
+                    )
+                if tasks_summary:
+                    for t in tasks_summary:
+                        interval = ""
+                        if t.get("interval_seconds"):
+                            iv = t["interval_seconds"]
+                            if iv >= 3600:
+                                interval = f" каждые {iv // 3600}ч"
+                            elif iv >= 60:
+                                interval = f" каждые {iv // 60}мин"
+                            else:
+                                interval = f" каждые {iv}с"
+                        lines.append(
+                            f"    #{t['id']} {t['name']} ({t['type']}/{t['callback']}{interval})"
+                        )
+                # Summary-тип: показать data_points
+                if ntype == "summary":
+                    dp = r.get("data_points", 0)
+                    lines = [f'"{task_name}": сводка ({dp} точек данных)']
+                    latest = r.get("latest", [])
+                    for item in latest[:3]:
+                        lines.append(f"    {json.dumps(item, ensure_ascii=False)}")
+                result.append("\n".join(lines))
+            return result
+        except Exception:
+            return []
 
     def get_message_count(self):
         return self.store.count("user")

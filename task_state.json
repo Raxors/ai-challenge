@@ -1,0 +1,23 @@
+{
+  "task_name": "MCP тестовая задача",
+  "phase": "execution",
+  "current_step": "",
+  "expected_action": "",
+  "previous_phase": "",
+  "previous_step": "",
+  "previous_expected_action": "",
+  "created_at": "2026-03-11T22:56:19.817141+00:00",
+  "updated_at": "2026-03-11T22:56:19.817779+00:00",
+  "history": [
+    {
+      "phase": "planning",
+      "step": "Определить эндпоинты",
+      "timestamp": "2026-03-11T22:56:19.817445+00:00"
+    },
+    {
+      "phase": "execution",
+      "step": "",
+      "timestamp": "2026-03-11T22:56:19.817783+00:00"
+    }
+  ]
+}

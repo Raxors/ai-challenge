@@ -4,17 +4,18 @@ MCP-сервер для YouTrack — предоставляет инструме
 
 Реализует JSON-RPC 2.0 поверх stdio (newline-delimited).
 Протокол: MCP 2024-11-05.
-
-Поддерживаемые методы:
-  - initialize            -> handshake
-  - notifications/initialized -> подтверждение
-  - tools/list            -> список доступных инструментов
-  - tools/call            -> вызов инструмента
 """
 
 import sys
 import json
 import os
+
+# Добавляем корень проекта в путь для импорта core
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from core.jsonrpc import JSONRPCServer
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "youtrack-mcp"
@@ -172,126 +173,67 @@ def _get_api():
 
 # ── Обработка инструментов ────────────────────────────
 
+_TOOL_HANDLERS = {
+    "youtrack_get_projects": lambda api, args: api.get_projects(
+        top=args.get("top", 10),
+    ),
+    "youtrack_get_issues": lambda api, args: api.get_issues(
+        query=args.get("query"),
+        project=args.get("project"),
+        top=args.get("top", 10),
+        skip=args.get("skip", 0),
+    ),
+    "youtrack_get_issue": lambda api, args: api.get_issue(args["issue_id"]),
+    "youtrack_create_issue": lambda api, args: api.create_issue(
+        project_id=args["project_id"],
+        summary=args["summary"],
+        description=args.get("description"),
+    ),
+    "youtrack_update_issue": lambda api, args: api.update_issue(
+        issue_id=args["issue_id"],
+        summary=args.get("summary"),
+        description=args.get("description"),
+    ),
+    "youtrack_delete_issue": lambda api, args: api.delete_issue(args["issue_id"]),
+}
+
+
 def handle_tool_call(name, arguments):
     """Выполнить инструмент и вернуть результат."""
-    api = _get_api()
-
-    if name == "youtrack_get_projects":
-        top = arguments.get("top", 10)
-        result = api.get_projects(top=top)
-        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
-
-    elif name == "youtrack_get_issues":
-        result = api.get_issues(
-            query=arguments.get("query"),
-            project=arguments.get("project"),
-            top=arguments.get("top", 10),
-            skip=arguments.get("skip", 0),
-        )
-        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
-
-    elif name == "youtrack_get_issue":
-        result = api.get_issue(arguments["issue_id"])
-        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
-
-    elif name == "youtrack_create_issue":
-        result = api.create_issue(
-            project_id=arguments["project_id"],
-            summary=arguments["summary"],
-            description=arguments.get("description"),
-        )
-        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
-
-    elif name == "youtrack_update_issue":
-        result = api.update_issue(
-            issue_id=arguments["issue_id"],
-            summary=arguments.get("summary"),
-            description=arguments.get("description"),
-        )
-        return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
-
-    elif name == "youtrack_delete_issue":
-        result = api.delete_issue(arguments["issue_id"])
-        return [{"type": "text", "text": json.dumps(
-            result if result else {"success": True}, ensure_ascii=False
-        )}]
-
-    else:
+    handler = _TOOL_HANDLERS.get(name)
+    if handler is None:
         raise ValueError(f"Unknown tool: {name}")
+    api = _get_api()
+    result = handler(api, arguments)
+    if result is None:
+        result = {"success": True}
+    return [{"type": "text", "text": json.dumps(result, ensure_ascii=False)}]
 
 
-# ── JSON-RPC обработка ────────────────────────────────
+# ── JSON-RPC обработка (совместимость с тестами) ──────
 
-def make_response(req_id, result):
-    """Создать JSON-RPC 2.0 response."""
-    return {"jsonrpc": "2.0", "id": req_id, "result": result}
-
-
-def make_error(req_id, code, message):
-    """Создать JSON-RPC 2.0 error response."""
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+_server = JSONRPCServer(SERVER_NAME, SERVER_VERSION, PROTOCOL_VERSION)
+_server.set_tools(TOOLS)
 
 
 def handle_message(raw_message):
-    """Обработать одно JSON-RPC сообщение. Вернуть ответ или None для notifications."""
-    method = raw_message.get("method", "")
-    params = raw_message.get("params", {})
-    req_id = raw_message.get("id")
-
-    if method == "initialize":
-        result = {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-        }
-        return make_response(req_id, result)
-
-    elif method == "notifications/initialized":
-        return None  # notification — ответ не требуется
-
-    elif method == "tools/list":
-        return make_response(req_id, {"tools": TOOLS})
-
-    elif method == "tools/call":
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
-        try:
-            content = handle_tool_call(tool_name, arguments)
-            return make_response(req_id, {"content": content, "isError": False})
-        except Exception as e:
-            return make_response(req_id, {
-                "content": [{"type": "text", "text": str(e)}],
-                "isError": True,
-            })
-
-    else:
-        # Неизвестный метод
-        if req_id is not None:
-            return make_error(req_id, -32601, f"Method not found: {method}")
-        return None  # notification для неизвестного метода — игнорируем
+    _server.handle_tool_call = handle_tool_call
+    return _server.handle_message(raw_message)
 
 
-# ── Основной цикл ─────────────────────────────────────
+def make_response(req_id, result):
+    from core.jsonrpc import make_response as _mr
+    return _mr(req_id, result)
+
+
+def make_error(req_id, code, message):
+    from core.jsonrpc import make_error as _me
+    return _me(req_id, code, message)
+
 
 def main():
-    """Читать JSON-RPC из stdin, обрабатывать, писать в stdout."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError as e:
-            error_resp = make_error(None, -32700, f"Parse error: {e}")
-            sys.stdout.write(json.dumps(error_resp) + "\n")
-            sys.stdout.flush()
-            continue
-
-        response = handle_message(message)
-
-        if response is not None:
-            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+    _server.handle_tool_call = handle_tool_call
+    _server.run_stdio()
 
 
 if __name__ == "__main__":

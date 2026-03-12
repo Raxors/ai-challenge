@@ -4,23 +4,14 @@ MCP-сервер — предоставляет инструменты аген�
 
 Реализует JSON-RPC 2.0 поверх stdio (newline-delimited).
 Протокол: MCP 2024-11-05.
-
-Поддерживаемые методы:
-  - initialize            → handshake
-  - notifications/initialized → подтверждение
-  - tools/list            → список доступных инструментов
-  - tools/call            → вызов инструмента
 """
 
-import sys
 import json
-import os
+from core.jsonrpc import JSONRPCServer
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "context-agent-mcp"
 SERVER_VERSION = "1.0.0"
-
-# ── Определение инструментов ─────────────────────────
 
 TOOLS = [
     {
@@ -127,8 +118,6 @@ TOOLS = [
 ]
 
 
-# ── Обработка инструментов ────────────────────────────
-
 def _get_agent():
     """Ленивое создание агента (при первом вызове tools/call)."""
     if not hasattr(_get_agent, "_agent"):
@@ -212,78 +201,29 @@ def handle_tool_call(name, arguments):
         raise ValueError(f"Unknown tool: {name}")
 
 
-# ── JSON-RPC обработка ────────────────────────────────
-
-def make_response(req_id, result):
-    """Создать JSON-RPC 2.0 response."""
-    return {"jsonrpc": "2.0", "id": req_id, "result": result}
-
-
-def make_error(req_id, code, message):
-    """Создать JSON-RPC 2.0 error response."""
-    return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+# Совместимость: handle_message и make_response/make_error как функции модуля
+_server = JSONRPCServer(SERVER_NAME, SERVER_VERSION, PROTOCOL_VERSION)
+_server.set_tools(TOOLS)
+_server.handle_tool_call = staticmethod(handle_tool_call)
 
 
 def handle_message(raw_message):
-    """Обработать одно JSON-RPC сообщение. Вернуть ответ или None для notifications."""
-    method = raw_message.get("method", "")
-    params = raw_message.get("params", {})
-    req_id = raw_message.get("id")
-
-    if method == "initialize":
-        result = {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-        }
-        return make_response(req_id, result)
-
-    elif method == "notifications/initialized":
-        return None  # notification — ответ не требуется
-
-    elif method == "tools/list":
-        return make_response(req_id, {"tools": TOOLS})
-
-    elif method == "tools/call":
-        tool_name = params.get("name", "")
-        arguments = params.get("arguments", {})
-        try:
-            content = handle_tool_call(tool_name, arguments)
-            return make_response(req_id, {"content": content, "isError": False})
-        except Exception as e:
-            return make_response(req_id, {
-                "content": [{"type": "text", "text": str(e)}],
-                "isError": True,
-            })
-
-    else:
-        # Неизвестный метод
-        if req_id is not None:
-            return make_error(req_id, -32601, f"Method not found: {method}")
-        return None  # notification для неизвестного метода — игнорируем
+    return _server.handle_message(raw_message)
 
 
-# ── Основной цикл ─────────────────────────────────────
+def make_response(req_id, result):
+    from core.jsonrpc import make_response as _mr
+    return _mr(req_id, result)
+
+
+def make_error(req_id, code, message):
+    from core.jsonrpc import make_error as _me
+    return _me(req_id, code, message)
+
 
 def main():
-    """Читать JSON-RPC из stdin, обрабатывать, писать в stdout."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError as e:
-            error_resp = make_error(None, -32700, f"Parse error: {e}")
-            sys.stdout.write(json.dumps(error_resp) + "\n")
-            sys.stdout.flush()
-            continue
-
-        response = handle_message(message)
-
-        if response is not None:
-            sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
-            sys.stdout.flush()
+    _server.handle_tool_call = handle_tool_call
+    _server.run_stdio()
 
 
 if __name__ == "__main__":
