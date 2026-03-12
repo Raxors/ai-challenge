@@ -9,3 +9,4 @@ chat_history.json
 /mcp_servers.json
 
 /youtrack_mcp/.env.youtrack
+/pipeline_output/
