@@ -66,14 +66,41 @@ class Agent:
                 break
         return pos
 
-    def _inject_system_context(self, messages):
-        """Inject profile, task state, and invariants as system messages.
+    def _build_mcp_orchestration_prompt(self):
+        """Build a system prompt describing connected MCP servers."""
+        if self.mcp_hub.is_empty():
+            return None
 
-        Insertion order (after existing system messages):
-          1. Profile
-          2. Task State
-          3. Invariants (last = highest recency weight)
-        """
+        tools = self.mcp_hub.list_all_tools()
+        if not tools:
+            return None
+
+        by_server = {}
+        for t in tools:
+            srv = t["server"]
+            if srv not in by_server:
+                by_server[srv] = []
+            by_server[srv].append(t)
+
+        lines = [
+            "[MCP] You have tools from multiple MCP servers. "
+            "IMPORTANT: When the user's request can be fulfilled by calling tools, "
+            "you MUST call them. Do not refuse or say you cannot do something if a tool exists for it. "
+            "You can chain tool calls: call one tool, take its result, and pass it to the next tool. "
+            "Always pass the full result data between tools — do not summarize or lose fields.",
+            "",
+            "Servers:",
+        ]
+        for srv, srv_tools in by_server.items():
+            tool_descs = [f'{srv}__{t["name"]} — {t["description"]}' for t in srv_tools]
+            lines.append(f"  [{srv}]")
+            for td in tool_descs:
+                lines.append(f"    {td}")
+
+        return "\n".join(lines)
+
+    def _inject_system_context(self, messages):
+        """Inject profile, task state, invariants, and MCP orchestration as system messages."""
         extras = []
         if not self.profile.is_empty():
             extras.append({"role": "system", "content": self.profile.to_prompt()})
@@ -81,6 +108,10 @@ class Agent:
             extras.append({"role": "system", "content": self.task_state.to_prompt()})
         if not self.invariants.is_empty():
             extras.append({"role": "system", "content": self.invariants.to_prompt()})
+
+        mcp_prompt = self._build_mcp_orchestration_prompt()
+        if mcp_prompt:
+            extras.append({"role": "system", "content": mcp_prompt})
 
         if not extras:
             return messages
@@ -121,6 +152,7 @@ class Agent:
         total_output_tokens = 0
         tool_iterations = 0
         max_tool_iterations = 10
+        mcp_call_log = []  # [{server, tool, error?}]
 
         while True:
             try:
@@ -184,8 +216,10 @@ class Agent:
                         tool_text = "\n".join(text_parts)
                     else:
                         tool_text = json.dumps(tool_result, ensure_ascii=False)
+                    mcp_call_log.append({"server": server_name, "tool": tool_name})
                 except Exception as e:
                     tool_text = f"Error: {e}"
+                    mcp_call_log.append({"server": server_name, "tool": tool_name, "error": str(e)})
 
                 messages_to_send.append({
                     "role": "tool",
@@ -234,6 +268,7 @@ class Agent:
             "invariants_count": len(self.invariants.invariants) if not self.invariants.is_empty() else 0,
             "mcp_tools": len(openai_tools) if openai_tools else 0,
             "mcp_tool_iterations": tool_iterations,
+            "mcp_call_log": mcp_call_log,
         }
 
         return result

@@ -130,8 +130,14 @@ def _get_agent():
         _get_agent._agent = Agent(
             model=llm,
             model_name="gpt-4o",
-            max_tokens=1024,
-            system_prompt="You are a helpful assistant. Answer concisely and clearly.",
+            max_tokens=4096,
+            system_prompt=(
+                "You are a helpful assistant with access to MCP tools. "
+                "When the user asks you to perform a task that involves multiple steps, "
+                "use the available tools in sequence. "
+                "Always use tools when they are relevant to the user's request. "
+                "Answer concisely and clearly."
+            ),
             strategy_name="sliding_window",
             window_size=10,
         )

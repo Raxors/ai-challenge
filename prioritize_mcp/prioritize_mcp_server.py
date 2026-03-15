@@ -96,13 +96,11 @@ def _prioritize(args):
     issues = args.get("issues", [])
     context = args.get("context", "")
 
-    if not issues:
-        return {
-            "prioritized_plan": "Нет задач для приоритизации.",
-            "issues_count": 0,
-        }
-
-    issues_text = _format_issues_for_llm(issues)
+    if issues:
+        issues_text = _format_issues_for_llm(issues)
+        issues_block = f"Задачи:\n{issues_text}"
+    else:
+        issues_block = "Список задач пуст — задачи не были найдены."
 
     context_block = ""
     if context:
@@ -110,8 +108,7 @@ def _prioritize(args):
 
     prompt = f"""Ты — менеджер проекта. Проанализируй список задач и распредели их по приоритету.
 
-Задачи:
-{issues_text}
+{issues_block}
 {context_block}
 Сгруппируй задачи в три категории:
 

@@ -88,10 +88,14 @@ def print_metrics(metrics, width):
     if inv_count:
         print(f"    Инварианты: {inv_count}")
 
-    mcp_tools = m.get("mcp_tools", 0)
-    mcp_iters = m.get("mcp_tool_iterations", 0)
-    if mcp_tools:
-        print(f"    MCP инструменты: {mcp_tools}  |  Вызовов инструментов: {mcp_iters}")
+    mcp_call_log = m.get("mcp_call_log", [])
+    if mcp_call_log:
+        print(f"    MCP вызовы ({len(mcp_call_log)}):")
+        for i, call in enumerate(mcp_call_log, 1):
+            err = f"  !! {call['error']}" if "error" in call else ""
+            print(f"      {i}. [{call['server']}] {call['tool']}{err}")
+    elif m.get("mcp_tools", 0):
+        print(f"    MCP инструменты: {m['mcp_tools']} (не использовались)")
 
     if ts:
         print(f"    Задача (FSM): {ts['task_name']}  |  Фаза: {ts['phase']}")
@@ -358,8 +362,15 @@ def main():
     agent = Agent(
         model=llm,
         model_name=MODEL_NAME,
-        max_tokens=1024,
-        system_prompt="You are a helpful assistant. Answer concisely and clearly.",
+        max_tokens=4096,
+        system_prompt=(
+            "You are a helpful assistant with access to MCP tools. "
+            "When the user asks you to perform a task that involves multiple steps "
+            "(e.g. search, process, save), use the available tools in sequence — "
+            "call them one by one, passing the result of each step to the next. "
+            "Always use tools when they are relevant to the user's request. "
+            "Answer concisely and clearly."
+        ),
         strategy_name=default_strategy,
         window_size=10,
     )
