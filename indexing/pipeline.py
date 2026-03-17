@@ -76,13 +76,14 @@ class IndexingPipeline:
 
         return results
 
-    def index_files(self, files, strategy="both", embed=True):
+    def index_files(self, files, strategy="both", embed=True, force=False):
         """
         Проиндексировать список файлов.
 
         files: список (filepath, text) или список путей к файлам.
         strategy: "fixed_size", "structural", или "both".
         embed: генерировать ли эмбеддинги.
+        force: если True — переиндексировать даже если файл уже в индексе.
 
         Возвращает dict со статистикой.
         """
@@ -101,13 +102,22 @@ class IndexingPipeline:
         if strategy in ("structural", "both"):
             strategies.append("structural")
 
+        # Проверяем, что уже проиндексировано
+        already_indexed = self.store.get_indexed_files() if not force else set()
+
         total_chunks = 0
         total_embedded = 0
+        skipped = 0
 
         for strat_name in strategies:
             chunker = self.chunkers[strat_name]
 
             for filepath, text in file_list:
+                # Пропускаем уже проиндексированные
+                if (filepath, strat_name) in already_indexed:
+                    skipped += 1
+                    continue
+
                 title = os.path.basename(filepath)
                 chunks = chunker.chunk(text, source_file=filepath, title=title)
 
@@ -126,16 +136,17 @@ class IndexingPipeline:
 
         return {
             "files_processed": len(file_list),
+            "files_skipped": skipped,
             "strategies": strategies,
             "total_chunks": total_chunks,
             "total_embedded": total_embedded,
             "store_stats": self.store.stats(),
         }
 
-    def index_directory(self, directory, strategy="both", embed=True, extensions=None):
+    def index_directory(self, directory, strategy="both", embed=True, extensions=None, force=False):
         """Сканировать директорию и проиндексировать все найденные файлы."""
         files = self.scan_directory(directory, extensions)
-        return self.index_files(files, strategy=strategy, embed=embed)
+        return self.index_files(files, strategy=strategy, embed=embed, force=force)
 
     def search(self, query, top_k=5, strategy=None):
         """Семантический поиск по индексу."""
@@ -205,6 +216,33 @@ class IndexingPipeline:
             "answer": answer,
             "chunks_used": len(results),
             "sources": sources,
+            "tokens": {
+                "input": resp.usage.prompt_tokens,
+                "output": resp.usage.completion_tokens,
+            },
+        }
+
+    def ask_no_rag(self, question, model="gpt-4o"):
+        """
+        Ответ LLM БЕЗ RAG — только собственные знания модели.
+        Для сравнения с RAG-ответом.
+        """
+        from openai import OpenAI
+        client = OpenAI()
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Ты — полезный ассистент. Отвечай точно и по существу."},
+                {"role": "user", "content": question},
+            ],
+            max_tokens=2048,
+        )
+
+        return {
+            "answer": resp.choices[0].message.content,
+            "chunks_used": 0,
+            "sources": [],
             "tokens": {
                 "input": resp.usage.prompt_tokens,
                 "output": resp.usage.completion_tokens,

@@ -45,6 +45,27 @@ class IndexStore(BaseStore):
         """)
         self.conn.commit()
 
+    def is_indexed(self, source_file, strategy=None):
+        """Проверить, проиндексирован ли файл (есть ли чанки для него)."""
+        if strategy:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE source_file = ? AND strategy = ?",
+                (source_file, strategy),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE source_file = ?",
+                (source_file,),
+            ).fetchone()
+        return row[0] > 0
+
+    def get_indexed_files(self):
+        """Получить множество (source_file, strategy) уже проиндексированных файлов."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT source_file, strategy FROM chunks"
+        ).fetchall()
+        return {(r[0], r[1]) for r in rows}
+
     def add_chunk(self, chunk, embedding_bytes=None):
         """Добавить чанк (и опционально эмбеддинг). Возвращает chunk_id."""
         meta = chunk.metadata.copy()

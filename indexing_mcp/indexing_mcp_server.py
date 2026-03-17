@@ -6,6 +6,7 @@ MCP-сервер индексации документов.
   - index_directory  — проиндексировать директорию (scan → chunk → embed → store)
   - index_search     — семантический поиск по индексу
   - index_ask        — RAG: вопрос → top-k чанков → LLM ответ с контекстом
+  - index_ask_no_rag — ответ LLM без RAG (для сравнения)
   - index_stats      — статистика хранилища
   - index_compare    — сравнить стратегии чанкинга на директории
 """
@@ -53,6 +54,10 @@ TOOLS = [
                 "db_path": {
                     "type": "string",
                     "description": "Путь к файлу БД индекса (по умолчанию index.db в корне проекта)",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Переиндексировать файлы даже если они уже в индексе (по умолчанию false)",
                 },
             },
             "required": ["directory"],
@@ -121,6 +126,23 @@ TOOLS = [
         },
     },
     {
+        "name": "index_ask_no_rag",
+        "description": (
+            "Ответ LLM БЕЗ RAG — только собственные знания модели, без контекста из документов. "
+            "Используется для сравнения качества ответа с RAG и без RAG."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Вопрос пользователя",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+    {
         "name": "index_stats",
         "description": "Статистика индекса: количество чанков, токенов, файлов по каждой стратегии.",
         "inputSchema": {
@@ -179,10 +201,11 @@ def _index_directory(args):
     strategy = args.get("strategy", "both")
     embed = args.get("embed", True)
     db_path = args.get("db_path")
+    force = args.get("force", False)
 
     pipeline = _get_pipeline(db_path)
     try:
-        result = pipeline.index_directory(directory, strategy=strategy, embed=embed)
+        result = pipeline.index_directory(directory, strategy=strategy, embed=embed, force=force)
     finally:
         pipeline.close()
 
@@ -216,6 +239,16 @@ def _index_ask(args):
     finally:
         pipeline.close()
 
+    return result
+
+
+def _index_ask_no_rag(args):
+    question = args["question"]
+    pipeline = _get_pipeline()
+    try:
+        result = pipeline.ask_no_rag(question)
+    finally:
+        pipeline.close()
     return result
 
 
@@ -280,6 +313,7 @@ _TOOL_HANDLERS = {
     "index_directory": _index_directory,
     "index_search": _index_search,
     "index_ask": _index_ask,
+    "index_ask_no_rag": _index_ask_no_rag,
     "index_stats": _index_stats,
     "index_compare": _index_compare,
 }

@@ -19,6 +19,9 @@ PYTHONPATH=. python3 tests/test_task_state.py
 PYTHONPATH=. python3 tests/test_invariants.py
 PYTHONPATH=. python3 tests/test_profiles.py
 PYTHONPATH=. python3 tests/test_memory_layers.py   # requires OPENAI_API_KEY (makes real LLM calls)
+PYTHONPATH=. python3 tests/test_indexing.py        # chunkers, store, embedder serialization
+PYTHONPATH=. python3 tests/test_indexing_demo.py   # full demo: index PDF + search (requires OPENAI_API_KEY)
+PYTHONPATH=. python3 tests/test_rag_comparison.py  # RAG vs No-RAG benchmark (requires OPENAI_API_KEY)
 ```
 
 Tests use a custom `main()` runner with `check()` assertions — not unittest/pytest. Each test file is run directly with `PYTHONPATH=.` set.
@@ -66,6 +69,7 @@ Each MCP server is a standalone JSON-RPC 2.0 process (stdio transport). All shar
 | prioritize_mcp | `prioritize_mcp/` | LLM-based task prioritization |
 | filesaver_mcp | `filesaver_mcp/` | Save text to `pipeline_output/` |
 | pipeline_mcp | `pipeline_mcp/` | Pipeline orchestrator (calls other 3 servers via MCPClient) |
+| indexing_mcp | `indexing_mcp/` | Document indexing + RAG (PDF/MD/TXT → chunks → embeddings → search/ask) |
 
 The agent itself also orchestrates MCP servers — it sees all tools and chains calls based on user intent.
 
