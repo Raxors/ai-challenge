@@ -222,6 +222,110 @@ class IndexingPipeline:
             },
         }
 
+    def ask_enhanced(self, question, top_k_initial=10, top_k_final=5,
+                     threshold=0.45, rewrite=False, strategy=None, model="gpt-4o"):
+        """
+        Улучшенный RAG с реранкингом и фильтрацией.
+
+        Пайплайн:
+          1. (опционально) query rewrite — LLM переформулирует запрос
+          2. поиск top_k_initial чанков по эмбеддингам
+          3. фильтрация по порогу similarity
+          4. LLM-реранкинг оставшихся чанков
+          5. отсечение по LLM-скору (< 3)
+          6. top_k_final → формирование контекста → LLM ответ
+        """
+        from indexing.reranker import Reranker
+        reranker = Reranker()
+
+        rerank_stats = {"rewrite_query": None, "rewrite_tokens": None}
+
+        # 1. Query rewrite
+        search_query = question
+        if rewrite:
+            rewritten, rw_tokens = reranker.rewrite_query(question)
+            search_query = rewritten
+            rerank_stats["rewrite_query"] = rewritten
+            rerank_stats["rewrite_tokens"] = rw_tokens
+
+        # 2. Широкий поиск
+        results = self.search(search_query, top_k=top_k_initial, strategy=strategy)
+
+        if not results:
+            return {
+                "answer": "В индексе не найдено релевантных документов.",
+                "chunks_used": 0,
+                "sources": [],
+                "rerank_stats": rerank_stats,
+            }
+
+        # 3–5. Threshold + LLM-rerank + score filter
+        pipeline_result = reranker.enhanced_pipeline(
+            question, results, threshold=threshold, top_k=top_k_final,
+        )
+        final_chunks = pipeline_result["chunks"]
+        rerank_stats.update(pipeline_result["stats"])
+
+        if not final_chunks:
+            return {
+                "answer": "После фильтрации не осталось достаточно релевантных фрагментов.",
+                "chunks_used": 0,
+                "sources": [],
+                "rerank_stats": rerank_stats,
+            }
+
+        # 6. Формируем контекст и вызываем LLM
+        context_parts = []
+        sources = []
+        for i, chunk in enumerate(final_chunks, 1):
+            source = chunk.get("source_file", "unknown")
+            sim = chunk.get("similarity", 0)
+            llm_score = chunk.get("llm_score", "?")
+            context_parts.append(
+                f"[Фрагмент {i}] (релевантность: {sim}, LLM-скор: {llm_score})\n{chunk['text']}"
+            )
+            sources.append({
+                "file": source,
+                "title": chunk.get("title", ""),
+                "similarity": sim,
+                "llm_score": llm_score,
+                "chunk_id": chunk.get("id"),
+            })
+
+        context_block = "\n\n---\n\n".join(context_parts)
+
+        from openai import OpenAI
+        client = OpenAI()
+
+        system_prompt = (
+            "Ты — полезный ассистент. Используй ТОЛЬКО приведённый ниже контекст "
+            "для ответа на вопрос пользователя. Если в контексте нет нужной информации, "
+            "так и скажи — не выдумывай.\n\n"
+            f"Контекст:\n\n{context_block}"
+        )
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": question},
+            ],
+            max_tokens=2048,
+        )
+
+        answer = resp.choices[0].message.content
+
+        return {
+            "answer": answer,
+            "chunks_used": len(final_chunks),
+            "sources": sources,
+            "tokens": {
+                "input": resp.usage.prompt_tokens,
+                "output": resp.usage.completion_tokens,
+            },
+            "rerank_stats": rerank_stats,
+        }
+
     def ask_no_rag(self, question, model="gpt-4o"):
         """
         Ответ LLM БЕЗ RAG — только собственные знания модели.

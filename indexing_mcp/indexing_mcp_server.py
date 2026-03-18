@@ -126,6 +126,49 @@ TOOLS = [
         },
     },
     {
+        "name": "index_ask_enhanced",
+        "description": (
+            "Улучшенный RAG с реранкингом и фильтрацией. "
+            "Пайплайн: query rewrite → широкий поиск → порог similarity → LLM-реранкинг → ответ. "
+            "Даёт более точные ответы за счёт отсечения нерелевантных чанков."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "Вопрос пользователя",
+                },
+                "threshold": {
+                    "type": "number",
+                    "description": "Порог similarity для отсечения (по умолчанию 0.45)",
+                },
+                "top_k_initial": {
+                    "type": "integer",
+                    "description": "Сколько чанков искать на первом этапе (по умолчанию 10)",
+                },
+                "top_k_final": {
+                    "type": "integer",
+                    "description": "Сколько чанков оставить после реранкинга (по умолчанию 5)",
+                },
+                "rewrite": {
+                    "type": "boolean",
+                    "description": "Переформулировать запрос через LLM перед поиском (по умолчанию false)",
+                },
+                "strategy": {
+                    "type": "string",
+                    "description": "Фильтр по стратегии чанкинга",
+                    "enum": ["fixed_size", "structural"],
+                },
+                "db_path": {
+                    "type": "string",
+                    "description": "Путь к БД индекса",
+                },
+            },
+            "required": ["question"],
+        },
+    },
+    {
         "name": "index_ask_no_rag",
         "description": (
             "Ответ LLM БЕЗ RAG — только собственные знания модели, без контекста из документов. "
@@ -242,6 +285,31 @@ def _index_ask(args):
     return result
 
 
+def _index_ask_enhanced(args):
+    question = args["question"]
+    threshold = args.get("threshold", 0.45)
+    top_k_initial = args.get("top_k_initial", 10)
+    top_k_final = args.get("top_k_final", 5)
+    rewrite = args.get("rewrite", False)
+    strategy = args.get("strategy")
+    db_path = args.get("db_path")
+
+    pipeline = _get_pipeline(db_path)
+    try:
+        result = pipeline.ask_enhanced(
+            question,
+            top_k_initial=top_k_initial,
+            top_k_final=top_k_final,
+            threshold=threshold,
+            rewrite=rewrite,
+            strategy=strategy,
+        )
+    finally:
+        pipeline.close()
+
+    return result
+
+
 def _index_ask_no_rag(args):
     question = args["question"]
     pipeline = _get_pipeline()
@@ -313,6 +381,7 @@ _TOOL_HANDLERS = {
     "index_directory": _index_directory,
     "index_search": _index_search,
     "index_ask": _index_ask,
+    "index_ask_enhanced": _index_ask_enhanced,
     "index_ask_no_rag": _index_ask_no_rag,
     "index_stats": _index_stats,
     "index_compare": _index_compare,
