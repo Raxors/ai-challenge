@@ -98,8 +98,9 @@ TOOLS = [
         "description": (
             "RAG-ответ на вопрос по проиндексированным документам. "
             "Автоматически: эмбеддинг запроса → поиск top-k релевантных чанков → "
-            "LLM генерирует ответ используя найденный контекст. "
-            "Идеально для вопросов вроде 'Какие у нас правила по код ревью?'"
+            "LLM генерирует ответ (JSON: answer + citations + sources_used). "
+            "Если релевантность ниже min_similarity — возвращает 'не знаю' (dont_know=true). "
+            "Всегда содержит поля: answer, citations (цитаты из чанков), sources (источники), dont_know."
         ),
         "inputSchema": {
             "type": "object",
@@ -117,6 +118,10 @@ TOOLS = [
                     "description": "Фильтр по стратегии чанкинга (опционально)",
                     "enum": ["fixed_size", "structural"],
                 },
+                "min_similarity": {
+                    "type": "number",
+                    "description": "Минимальный порог релевантности (0.0–1.0). Если максимальная similarity найденных чанков ниже — возвращает 'не знаю' (по умолчанию 0.3)",
+                },
                 "db_path": {
                     "type": "string",
                     "description": "Путь к файлу БД индекса (по умолчанию index.db)",
@@ -128,8 +133,9 @@ TOOLS = [
     {
         "name": "index_ask_enhanced",
         "description": (
-            "Улучшенный RAG с реранкингом и фильтрацией. "
-            "Пайплайн: query rewrite → широкий поиск → порог similarity → LLM-реранкинг → ответ. "
+            "Улучшенный RAG с реранкингом, фильтрацией и структурированным ответом. "
+            "Пайплайн: query rewrite → широкий поиск → порог similarity → LLM-реранкинг → ответ (JSON: answer + citations + sources). "
+            "Если релевантность ниже min_similarity — возвращает 'не знаю' (dont_know=true). "
             "Даёт более точные ответы за счёт отсечения нерелевантных чанков."
         ),
         "inputSchema": {
@@ -141,7 +147,11 @@ TOOLS = [
                 },
                 "threshold": {
                     "type": "number",
-                    "description": "Порог similarity для отсечения (по умолчанию 0.45)",
+                    "description": "Порог similarity для отсечения при реранкинге (по умолчанию 0.45)",
+                },
+                "min_similarity": {
+                    "type": "number",
+                    "description": "Минимальный порог релевантности для режима 'не знаю' (по умолчанию 0.3)",
                 },
                 "top_k_initial": {
                     "type": "integer",
@@ -275,10 +285,11 @@ def _index_ask(args):
     top_k = args.get("top_k", 5)
     strategy = args.get("strategy")
     db_path = args.get("db_path")
+    min_similarity = args.get("min_similarity", 0.3)
 
     pipeline = _get_pipeline(db_path)
     try:
-        result = pipeline.ask(question, top_k=top_k, strategy=strategy)
+        result = pipeline.ask(question, top_k=top_k, strategy=strategy, min_similarity=min_similarity)
     finally:
         pipeline.close()
 
@@ -288,6 +299,7 @@ def _index_ask(args):
 def _index_ask_enhanced(args):
     question = args["question"]
     threshold = args.get("threshold", 0.45)
+    min_similarity = args.get("min_similarity", 0.3)
     top_k_initial = args.get("top_k_initial", 10)
     top_k_final = args.get("top_k_final", 5)
     rewrite = args.get("rewrite", False)
@@ -303,6 +315,7 @@ def _index_ask_enhanced(args):
             threshold=threshold,
             rewrite=rewrite,
             strategy=strategy,
+            min_similarity=min_similarity,
         )
     finally:
         pipeline.close()

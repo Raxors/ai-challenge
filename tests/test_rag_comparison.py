@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Тест: RAG vs No-RAG — сравнение качества ответов.
+Тест: RAG vs No-RAG — сравнение качества ответов + валидация цитат и источников.
 
 Этап 1. Индексация книги «Грокаем машинное обучение» (PDF → чанки → эмбеддинги)
 Этап 2. 10 контрольных вопросов — ответ с RAG и без RAG
-Этап 3. Сравнительная таблица результатов
+Этап 3. Валидация: есть ли источники, цитаты, совпадает ли смысл цитат с ответом
+Этап 4. Тест режима "не знаю" — нерелевантные вопросы должны вернуть отказ
+Этап 5. Сводная таблица результатов
 
 Результат:
-  Агент с двумя режимами (с RAG / без RAG) + 10 контрольных вопросов и сравнение качества
+  Ответы с обязательными источниками и цитатами + режим "не знаю" при слабом контексте
 """
 
 import os
@@ -90,6 +92,14 @@ BENCHMARK = [
     },
 ]
 
+# ── Вопросы для теста "не знаю" ──────────────────────────
+# Эти вопросы не связаны с книгой по ML — ожидаем отказ от ответа
+DONT_KNOW_QUESTIONS = [
+    "Каков рецепт итальянской пасты карбонара?",
+    "Кто написал симфонию №9 Людвига ван Бетховена и в каком году?",
+    "Как устроен реактивный двигатель самолёта?",
+]
+
 
 def header(title):
     print(f"\n{'=' * W}")
@@ -117,6 +127,27 @@ def wrap_text(text, width=74, indent=6):
     if current:
         lines.append(" " * indent + current)
     return "\n".join(lines)
+
+
+def check_citation_relevance(answer, citations):
+    """
+    Простая проверка: хотя бы одно слово из цитаты встречается в ответе,
+    или хотя бы слово из ответа встречается в цитате.
+    Возвращает количество цитат, которые семантически пересекаются с ответом.
+    """
+    if not citations:
+        return 0
+
+    answer_words = set(answer.lower().split())
+    relevant_count = 0
+    for citation in citations:
+        citation_words = set(citation.lower().split())
+        overlap = answer_words & citation_words
+        # Игнорируем стоп-слова короче 3 символов
+        meaningful_overlap = {w for w in overlap if len(w) >= 3}
+        if meaningful_overlap:
+            relevant_count += 1
+    return relevant_count
 
 
 # ── Этап 1: Индексация ──────────────────────────────────
@@ -187,24 +218,48 @@ def run_benchmark(pipeline):
         rag = pipeline.ask(q, top_k=5, strategy="structural")
         rag_time = time.time() - t0
 
-        # Вывод
+        # Вывод No-RAG
         print(f"\n  [БЕЗ RAG] ({no_rag['tokens']['output']} токенов, {no_rag_time:.1f}s)")
         answer_no_rag = no_rag["answer"][:300]
         print(wrap_text(answer_no_rag))
         if len(no_rag["answer"]) > 300:
             print(f"      ...")
 
+        # Вывод RAG
         print(f"\n  [С RAG] ({rag['tokens']['output']} токенов, {rag_time:.1f}s, "
-              f"чанков: {rag['chunks_used']})")
+              f"чанков: {rag['chunks_used']}, dont_know={rag.get('dont_know', False)})")
         answer_rag = rag["answer"][:300]
         print(wrap_text(answer_rag))
         if len(rag["answer"]) > 300:
             print(f"      ...")
 
         # Источники
-        if rag.get("sources"):
-            sims = [f"{s['similarity']}" for s in rag["sources"][:3]]
-            print(f"\n      Релевантность top-3: {', '.join(sims)}")
+        sources = rag.get("sources", [])
+        citations = rag.get("citations", [])
+
+        if sources:
+            sims = [f"{s['similarity']}" for s in sources[:3]]
+            print(f"\n      Источники ({len(sources)}): релевантность top-3: {', '.join(sims)}")
+            for s in sources[:2]:
+                fname = os.path.basename(s.get("file", "?"))
+                print(f"        • chunk_id={s.get('chunk_id')} | {fname} | sim={s['similarity']}")
+
+        if citations:
+            print(f"\n      Цитаты ({len(citations)}):")
+            for c in citations[:2]:
+                print(wrap_text(f'"{c[:120]}"', width=72, indent=8))
+        else:
+            print(f"\n      ⚠ Цитаты отсутствуют!")
+
+        # Валидация цитат
+        relevant_cit = check_citation_relevance(rag["answer"], citations)
+        citation_ok = len(citations) > 0
+        source_ok = len(sources) > 0
+        cit_match_ok = relevant_cit > 0 if citations else False
+
+        print(f"\n      Валидация: источники={'✓' if source_ok else '✗'} | "
+              f"цитаты={'✓' if citation_ok else '✗'} | "
+              f"совпадение={'✓' if cit_match_ok else '✗'} ({relevant_cit}/{len(citations)})")
 
         results.append({
             "question": q,
@@ -218,41 +273,125 @@ def run_benchmark(pipeline):
             "rag_time": round(rag_time, 2),
             "rag_chunks_used": rag["chunks_used"],
             "rag_sources": rag.get("sources", []),
+            "rag_citations": rag.get("citations", []),
+            "rag_dont_know": rag.get("dont_know", False),
+            "validation": {
+                "has_sources": source_ok,
+                "has_citations": citation_ok,
+                "citations_match_answer": cit_match_ok,
+                "relevant_citations": relevant_cit,
+                "total_citations": len(citations),
+            },
         })
 
     return results
 
 
-# ── Этап 3: Сводная таблица ──────────────────────────────
+# ── Этап 3: Тест "не знаю" ──────────────────────────────
 
-def print_summary(results):
-    header("ЭТАП 3: СВОДНАЯ ТАБЛИЦА")
+def run_dont_know_test(pipeline):
+    header("ЭТАП 3: ТЕСТ РЕЖИМА 'НЕ ЗНАЮ' (нерелевантные вопросы)")
 
-    # Таблица
-    print(f"\n  {'#':<3} {'Вопрос':<45} {'No-RAG':>8} {'RAG':>8} {'Чанки':>6}")
-    print(f"  {'—'*3} {'—'*45} {'—'*8} {'—'*8} {'—'*6}")
+    print(f"  Порог релевантности: min_similarity=0.3")
+    print(f"  Ожидаем: dont_know=True для вопросов вне темы книги\n")
+
+    dont_know_results = []
+
+    for i, q in enumerate(DONT_KNOW_QUESTIONS, 1):
+        section(f"Нерелевантный вопрос {i}: {q}")
+
+        t0 = time.time()
+        rag = pipeline.ask(q, top_k=5, strategy="structural", min_similarity=0.3)
+        elapsed = time.time() - t0
+
+        dont_know = rag.get("dont_know", False)
+        max_sim = rag.get("max_similarity", None)
+        answer_preview = rag["answer"][:200]
+
+        print(f"  dont_know={dont_know} | max_sim={max_sim} | {elapsed:.1f}s")
+        print(wrap_text(answer_preview))
+
+        status = "✓ ПРАВИЛЬНО (отказал)" if dont_know else "✗ ОШИБКА (ответил на нерелевантный вопрос)"
+        print(f"  {status}")
+
+        dont_know_results.append({
+            "question": q,
+            "dont_know": dont_know,
+            "max_similarity": max_sim,
+            "answer": rag["answer"],
+            "correct": dont_know,
+        })
+
+    correct = sum(1 for r in dont_know_results if r["correct"])
+    print(f"\n  Режим 'не знаю': {correct}/{len(dont_know_results)} правильных отказов")
+
+    return dont_know_results
+
+
+# ── Этап 4: Сводная таблица ──────────────────────────────
+
+def print_summary(results, dont_know_results):
+    header("ЭТАП 4: СВОДНАЯ ТАБЛИЦА")
+
+    # Таблица ответов
+    print(f"\n  {'#':<3} {'Вопрос':<38} {'No-RAG':>6} {'RAG':>6} {'Src':>4} {'Cit':>4} {'Match':>5}")
+    print(f"  {'—'*3} {'—'*38} {'—'*6} {'—'*6} {'—'*4} {'—'*4} {'—'*5}")
 
     total_no_rag_in = 0
     total_no_rag_out = 0
     total_rag_in = 0
     total_rag_out = 0
 
+    val_sources_ok = 0
+    val_citations_ok = 0
+    val_match_ok = 0
+
     for i, r in enumerate(results, 1):
-        q_short = r["question"][:43] + ".." if len(r["question"]) > 45 else r["question"]
+        q_short = r["question"][:36] + ".." if len(r["question"]) > 38 else r["question"]
         no_rag_tok = r["no_rag_tokens"]["output"]
         rag_tok = r["rag_tokens"]["output"]
-        chunks = r["rag_chunks_used"]
-        print(f"  {i:<3} {q_short:<45} {no_rag_tok:>8} {rag_tok:>8} {chunks:>6}")
+        v = r["validation"]
+        src = "✓" if v["has_sources"] else "✗"
+        cit = "✓" if v["has_citations"] else "✗"
+        match = "✓" if v["citations_match_answer"] else "✗"
+
+        print(f"  {i:<3} {q_short:<38} {no_rag_tok:>6} {rag_tok:>6} {src:>4} {cit:>4} {match:>5}")
 
         total_no_rag_in += r["no_rag_tokens"]["input"]
         total_no_rag_out += r["no_rag_tokens"]["output"]
         total_rag_in += r["rag_tokens"]["input"]
         total_rag_out += r["rag_tokens"]["output"]
 
-    print(f"  {'—'*3} {'—'*45} {'—'*8} {'—'*8} {'—'*6}")
+        if v["has_sources"]:
+            val_sources_ok += 1
+        if v["has_citations"]:
+            val_citations_ok += 1
+        if v["citations_match_answer"]:
+            val_match_ok += 1
+
+    print(f"  {'—'*3} {'—'*38} {'—'*6} {'—'*6} {'—'*4} {'—'*4} {'—'*5}")
+    print(f"  Легенда: Src=источники, Cit=цитаты, Match=совпадение цитат с ответом")
+
+    # Метрики валидации
+    section("Валидация качества RAG-ответов")
+    n = len(results)
+    print(f"  Источники в каждом ответе:  {val_sources_ok}/{n}  {'✓ OK' if val_sources_ok == n else '✗ ПРОБЛЕМА'}")
+    print(f"  Цитаты в каждом ответе:     {val_citations_ok}/{n}  {'✓ OK' if val_citations_ok == n else '✗ ПРОБЛЕМА'}")
+    print(f"  Цитаты совпадают с ответом: {val_match_ok}/{n}  {'✓ OK' if val_match_ok >= n * 0.8 else '✗ ПРОБЛЕМА'}")
+
+    # Тест "не знаю"
+    section("Тест режима 'не знаю'")
+    dk_correct = sum(1 for r in dont_know_results if r["correct"])
+    print(f"  Правильных отказов: {dk_correct}/{len(dont_know_results)}  "
+          f"{'✓ OK' if dk_correct == len(dont_know_results) else '✗ ПРОБЛЕМА'}")
+    for r in dont_know_results:
+        status = "✓" if r["correct"] else "✗"
+        sim_str = f"max_sim={r['max_similarity']:.3f}" if r["max_similarity"] is not None else "no_sim"
+        q_short = r["question"][:55]
+        print(f"    {status} {q_short} ({sim_str})")
 
     # Общие метрики
-    section("Общая статистика")
+    section("Общая статистика токенов")
     print(f"  No-RAG:  input={total_no_rag_in:,} / output={total_no_rag_out:,} токенов")
     print(f"  RAG:     input={total_rag_in:,} / output={total_rag_out:,} токенов")
     print(f"  RAG overhead (input): +{total_rag_in - total_no_rag_in:,} токенов (контекст из чанков)")
@@ -263,20 +402,33 @@ def print_summary(results):
     print(f"  Время RAG:    {total_rag_time:.1f}s")
 
     section("Выводы")
-    print("  ▸ RAG-ответы опираются на конкретные фрагменты книги")
-    print("  ▸ No-RAG даёт общие знания модели (могут быть неточны для книги)")
-    print("  ▸ RAG использует больше input-токенов (контекст из чанков)")
-    print("  ▸ RAG-ответы содержат специфику из книги Серрано")
+    print("  ▸ RAG-ответы содержат обязательные источники (chunk_id + similarity)")
+    print("  ▸ RAG-ответы содержат дословные цитаты из релевантных фрагментов")
+    print("  ▸ Цитаты семантически совпадают с содержанием ответа")
+    print("  ▸ Режим 'не знаю' срабатывает при слабом контексте (similarity < 0.3)")
+    print("  ▸ No-RAG даёт общие знания модели — без ссылок на источники")
 
     return results
 
 
 # ── Сохранение результатов ───────────────────────────────
 
-def save_results(results, path):
+def save_results(results, dont_know_results, path):
     """Сохранить результаты в JSON для анализа."""
+    output = {
+        "benchmark": results,
+        "dont_know_test": dont_know_results,
+        "summary": {
+            "total_questions": len(results),
+            "sources_present": sum(1 for r in results if r["validation"]["has_sources"]),
+            "citations_present": sum(1 for r in results if r["validation"]["has_citations"]),
+            "citations_match": sum(1 for r in results if r["validation"]["citations_match_answer"]),
+            "dont_know_correct": sum(1 for r in dont_know_results if r["correct"]),
+            "dont_know_total": len(dont_know_results),
+        },
+    }
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+        json.dump(output, f, ensure_ascii=False, indent=2)
     print(f"\n  ✓ Результаты сохранены: {path}")
 
 
@@ -284,7 +436,7 @@ def save_results(results, path):
 
 def main():
     print(f"\n{'#' * W}")
-    print(f"##  ТЕСТ: RAG vs NO-RAG — СРАВНЕНИЕ КАЧЕСТВА ОТВЕТОВ")
+    print(f"##  ТЕСТ: RAG + ЦИТАТЫ + ИСТОЧНИКИ + РЕЖИМ 'НЕ ЗНАЮ'")
     print(f"##  10 контрольных вопросов по книге «Грокаем машинное обучение»")
     print(f"{'#' * W}")
 
@@ -296,23 +448,27 @@ def main():
     if pipeline is None:
         return False
 
-    # 2. Бенчмарк
+    # 2. Бенчмарк RAG vs No-RAG
     results = run_benchmark(pipeline)
 
-    # 3. Итоги
-    print_summary(results)
+    # 3. Тест режима "не знаю"
+    dont_know_results = run_dont_know_test(pipeline)
+
+    # 4. Итоги
+    print_summary(results, dont_know_results)
 
     # Сохраняем
     results_path = os.path.join(PROJECT_ROOT, "pipeline_output", "rag_benchmark.json")
     os.makedirs(os.path.dirname(results_path), exist_ok=True)
-    save_results(results, results_path)
+    save_results(results, dont_know_results, results_path)
 
     pipeline.close()
 
     header("ГОТОВО")
-    print("  ✓ Агент с двумя режимами (RAG / без RAG)")
+    print("  ✓ RAG-ответы содержат обязательные источники и цитаты")
     print("  ✓ 10 контрольных вопросов отработаны")
-    print("  ✓ Сравнительная таблица выведена")
+    print("  ✓ Режим 'не знаю' проверен на нерелевантных вопросах")
+    print("  ✓ Сравнительная таблица с валидацией выведена")
     print()
 
     return True

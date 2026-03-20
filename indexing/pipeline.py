@@ -153,25 +153,52 @@ class IndexingPipeline:
         query_emb = self.embedder.embed_one(query)
         return self.store.search_similar(query_emb, top_k=top_k, strategy=strategy)
 
-    def ask(self, question, top_k=5, strategy=None, model="gpt-4o"):
+    def ask(self, question, top_k=5, strategy=None, model="gpt-4o", min_similarity=0.3):
         """
         RAG: вопрос пользователя → эмбеддинг → top-k чанков → LLM ответ с контекстом.
 
         1. vector = embedder(question)
         2. chunks = top_k_filter(vector)
-        3. LLM(system=context_chunks, user=question)
+        3. Проверка порога min_similarity — если ниже, возвращаем "не знаю"
+        4. LLM(system=context_chunks, user=question) → JSON {answer, citations, sources_used}
+
+        Возвращает dict с полями:
+          answer      — текст ответа
+          citations   — список дословных цитат из чанков
+          sources     — список использованных источников
+          dont_know   — True если релевантность ниже порога
         """
+        import json as _json
+
         # 1. Ищем релевантные чанки
         results = self.search(question, top_k=top_k, strategy=strategy)
 
         if not results:
             return {
-                "answer": "В индексе не найдено релевантных документов для ответа на этот вопрос.",
+                "answer": "Не знаю — в индексе не найдено документов. Добавьте документы и повторите запрос.",
                 "chunks_used": 0,
                 "sources": [],
+                "citations": [],
+                "dont_know": True,
             }
 
-        # 2. Формируем контекст из чанков
+        # 2. Проверяем минимальный порог релевантности
+        max_sim = max(c.get("similarity", 0) for c in results)
+        if max_sim < min_similarity:
+            return {
+                "answer": (
+                    f"Не знаю — максимальная релевантность найденных фрагментов "
+                    f"({max_sim:.3f}) ниже порога ({min_similarity}). "
+                    f"Уточните запрос или добавьте более релевантные документы."
+                ),
+                "chunks_used": 0,
+                "sources": [],
+                "citations": [],
+                "dont_know": True,
+                "max_similarity": max_sim,
+            }
+
+        # 3. Формируем контекст из чанков
         context_parts = []
         sources = []
         for i, chunk in enumerate(results, 1):
@@ -179,25 +206,32 @@ class IndexingPipeline:
             title = chunk.get("title", "")
             sim = chunk.get("similarity", 0)
             context_parts.append(
-                f"[Фрагмент {i}] (файл: {source}, релевантность: {sim})\n{chunk['text']}"
+                f"[Фрагмент {i}] (файл: {source}, релевантность: {sim:.4f})\n{chunk['text']}"
             )
             sources.append({
                 "file": source,
                 "title": title,
-                "similarity": sim,
+                "similarity": round(sim, 4),
                 "chunk_id": chunk.get("id"),
             })
 
         context_block = "\n\n---\n\n".join(context_parts)
 
-        # 3. Вызываем LLM
+        # 4. Вызываем LLM — требуем структурированный JSON-ответ
         from openai import OpenAI
         client = OpenAI()
 
         system_prompt = (
             "Ты — полезный ассистент. Используй ТОЛЬКО приведённый ниже контекст "
-            "для ответа на вопрос пользователя. Если в контексте нет нужной информации, "
-            "так и скажи — не выдумывай.\n\n"
+            "для ответа на вопрос пользователя.\n\n"
+            "Ответ ОБЯЗАТЕЛЬНО верни в формате JSON со следующими полями:\n"
+            '  "answer": развёрнутый ответ на вопрос на основе контекста\n'
+            '  "citations": список из 1–3 коротких дословных цитат из фрагментов, '
+            'подтверждающих ответ\n'
+            '  "sources_used": список номеров фрагментов [1, 2, ...], которые ты использовал\n\n'
+            "Если в контексте нет нужной информации — верни строго:\n"
+            '{"answer": "Не знаю — в предоставленном контексте нет информации по этому вопросу. '
+            'Уточните запрос.", "citations": [], "sources_used": []}\n\n'
             f"Контекст:\n\n{context_block}"
         )
 
@@ -208,14 +242,40 @@ class IndexingPipeline:
                 {"role": "user", "content": question},
             ],
             max_tokens=2048,
+            response_format={"type": "json_object"},
         )
 
-        answer = resp.choices[0].message.content
+        raw = resp.choices[0].message.content
+        try:
+            parsed = _json.loads(raw)
+            answer = parsed.get("answer", raw)
+            citations = parsed.get("citations", [])
+            sources_used_nums = parsed.get("sources_used", [])
+        except (_json.JSONDecodeError, AttributeError):
+            answer = raw
+            citations = []
+            sources_used_nums = []
+
+        # Фильтруем источники — только те, что реально использовал LLM
+        used_sources = []
+        if sources_used_nums:
+            for idx in sources_used_nums:
+                if isinstance(idx, int) and 1 <= idx <= len(sources):
+                    used_sources.append(sources[idx - 1])
+        if not used_sources:
+            used_sources = sources  # fallback: все источники
+
+        dont_know = (
+            not citations and not sources_used_nums
+            and "не знаю" in answer.lower()
+        )
 
         return {
             "answer": answer,
             "chunks_used": len(results),
-            "sources": sources,
+            "sources": used_sources,
+            "citations": citations,
+            "dont_know": dont_know,
             "tokens": {
                 "input": resp.usage.prompt_tokens,
                 "output": resp.usage.completion_tokens,
@@ -223,9 +283,10 @@ class IndexingPipeline:
         }
 
     def ask_enhanced(self, question, top_k_initial=10, top_k_final=5,
-                     threshold=0.45, rewrite=False, strategy=None, model="gpt-4o"):
+                     threshold=0.45, rewrite=False, strategy=None, model="gpt-4o",
+                     min_similarity=0.3):
         """
-        Улучшенный RAG с реранкингом и фильтрацией.
+        Улучшенный RAG с реранкингом, фильтрацией и структурированным ответом.
 
         Пайплайн:
           1. (опционально) query rewrite — LLM переформулирует запрос
@@ -233,8 +294,11 @@ class IndexingPipeline:
           3. фильтрация по порогу similarity
           4. LLM-реранкинг оставшихся чанков
           5. отсечение по LLM-скору (< 3)
-          6. top_k_final → формирование контекста → LLM ответ
+          6. top_k_final → формирование контекста → LLM ответ (JSON: answer+citations+sources)
+
+        Проверка min_similarity: если максимальная релевантность ниже порога — "не знаю".
         """
+        import json as _json
         from indexing.reranker import Reranker
         reranker = Reranker()
 
@@ -253,9 +317,28 @@ class IndexingPipeline:
 
         if not results:
             return {
-                "answer": "В индексе не найдено релевантных документов.",
+                "answer": "Не знаю — в индексе не найдено документов. Добавьте документы и повторите запрос.",
                 "chunks_used": 0,
                 "sources": [],
+                "citations": [],
+                "dont_know": True,
+                "rerank_stats": rerank_stats,
+            }
+
+        # 2a. Проверяем минимальный порог релевантности
+        max_sim = max(c.get("similarity", 0) for c in results)
+        if max_sim < min_similarity:
+            return {
+                "answer": (
+                    f"Не знаю — максимальная релевантность найденных фрагментов "
+                    f"({max_sim:.3f}) ниже порога ({min_similarity}). "
+                    f"Уточните запрос или добавьте более релевантные документы."
+                ),
+                "chunks_used": 0,
+                "sources": [],
+                "citations": [],
+                "dont_know": True,
+                "max_similarity": max_sim,
                 "rerank_stats": rerank_stats,
             }
 
@@ -268,9 +351,11 @@ class IndexingPipeline:
 
         if not final_chunks:
             return {
-                "answer": "После фильтрации не осталось достаточно релевантных фрагментов.",
+                "answer": "Не знаю — после фильтрации не осталось достаточно релевантных фрагментов. Уточните запрос.",
                 "chunks_used": 0,
                 "sources": [],
+                "citations": [],
+                "dont_know": True,
                 "rerank_stats": rerank_stats,
             }
 
@@ -282,12 +367,12 @@ class IndexingPipeline:
             sim = chunk.get("similarity", 0)
             llm_score = chunk.get("llm_score", "?")
             context_parts.append(
-                f"[Фрагмент {i}] (релевантность: {sim}, LLM-скор: {llm_score})\n{chunk['text']}"
+                f"[Фрагмент {i}] (релевантность: {sim:.4f}, LLM-скор: {llm_score})\n{chunk['text']}"
             )
             sources.append({
                 "file": source,
                 "title": chunk.get("title", ""),
-                "similarity": sim,
+                "similarity": round(sim, 4),
                 "llm_score": llm_score,
                 "chunk_id": chunk.get("id"),
             })
@@ -299,8 +384,15 @@ class IndexingPipeline:
 
         system_prompt = (
             "Ты — полезный ассистент. Используй ТОЛЬКО приведённый ниже контекст "
-            "для ответа на вопрос пользователя. Если в контексте нет нужной информации, "
-            "так и скажи — не выдумывай.\n\n"
+            "для ответа на вопрос пользователя.\n\n"
+            "Ответ ОБЯЗАТЕЛЬНО верни в формате JSON со следующими полями:\n"
+            '  "answer": развёрнутый ответ на вопрос на основе контекста\n'
+            '  "citations": список из 1–3 коротких дословных цитат из фрагментов, '
+            'подтверждающих ответ\n'
+            '  "sources_used": список номеров фрагментов [1, 2, ...], которые ты использовал\n\n'
+            "Если в контексте нет нужной информации — верни строго:\n"
+            '{"answer": "Не знаю — в предоставленном контексте нет информации по этому вопросу. '
+            'Уточните запрос.", "citations": [], "sources_used": []}\n\n'
             f"Контекст:\n\n{context_block}"
         )
 
@@ -311,14 +403,40 @@ class IndexingPipeline:
                 {"role": "user", "content": question},
             ],
             max_tokens=2048,
+            response_format={"type": "json_object"},
         )
 
-        answer = resp.choices[0].message.content
+        raw = resp.choices[0].message.content
+        try:
+            parsed = _json.loads(raw)
+            answer = parsed.get("answer", raw)
+            citations = parsed.get("citations", [])
+            sources_used_nums = parsed.get("sources_used", [])
+        except (_json.JSONDecodeError, AttributeError):
+            answer = raw
+            citations = []
+            sources_used_nums = []
+
+        # Фильтруем источники — только те, что реально использовал LLM
+        used_sources = []
+        if sources_used_nums:
+            for idx in sources_used_nums:
+                if isinstance(idx, int) and 1 <= idx <= len(sources):
+                    used_sources.append(sources[idx - 1])
+        if not used_sources:
+            used_sources = sources  # fallback: все источники
+
+        dont_know = (
+            not citations and not sources_used_nums
+            and "не знаю" in answer.lower()
+        )
 
         return {
             "answer": answer,
             "chunks_used": len(final_chunks),
-            "sources": sources,
+            "sources": used_sources,
+            "citations": citations,
+            "dont_know": dont_know,
             "tokens": {
                 "input": resp.usage.prompt_tokens,
                 "output": resp.usage.completion_tokens,
