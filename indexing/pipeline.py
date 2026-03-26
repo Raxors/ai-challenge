@@ -4,7 +4,10 @@
 """
 
 import os
+import json as _json
 import glob
+import time
+import requests
 from indexing.chunkers import FixedSizeChunker, StructuralChunker
 from indexing.embedder import Embedder
 from indexing.index_store import IndexStore
@@ -31,11 +34,12 @@ def _read_pdf(filepath):
 class IndexingPipeline:
     """
     Полный пайплайн: сканирование файлов → чанкинг → эмбеддинги → сохранение.
+    Поддерживает облачные (OpenAI) и локальные (Ollama) модели.
     """
 
-    def __init__(self, db_path="index.db", api_key=None):
+    def __init__(self, db_path="index.db", api_key=None, embedder=None):
         self.store = IndexStore(db_path=db_path)
-        self.embedder = Embedder(api_key=api_key)
+        self.embedder = embedder or Embedder(api_key=api_key)
         self.chunkers = {
             "fixed_size": FixedSizeChunker(chunk_size=256, overlap_tokens=64),
             "structural": StructuralChunker(max_chunk_tokens=512),
@@ -469,6 +473,173 @@ class IndexingPipeline:
                 "input": resp.usage.prompt_tokens,
                 "output": resp.usage.completion_tokens,
             },
+        }
+
+    # ── Локальные методы (Ollama) ─────────────────────────
+
+    def _ollama_chat(self, messages, model="qwen3.5:latest", max_tokens=1024,
+                     base_url="http://localhost:11434"):
+        """Вызов Ollama /api/chat. Возвращает (text, input_tokens, output_tokens)."""
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {"num_predict": max_tokens, "temperature": 0.3},
+        }
+        # Qwen3.5 тратит токены на <think>, даём больше места
+        if "qwen" in model.lower():
+            payload["options"]["num_predict"] = max(max_tokens, 2048)
+        # Для qwen: добавляем пустой think-блок чтобы пропустить thinking mode
+        if "qwen" in model.lower():
+            messages = list(messages)  # copy
+            messages.append({"role": "assistant", "content": "<think>\n</think>\n\n"})
+            payload["messages"] = messages
+
+        resp = requests.post(f"{base_url}/api/chat", json=payload, timeout=300)
+        resp.raise_for_status()
+        data = resp.json()
+        text = data.get("message", {}).get("content", "")
+        return text, data.get("prompt_eval_count", 0), data.get("eval_count", 0)
+
+    def ask_local(self, question, top_k=5, strategy=None,
+                  ollama_model="qwen3.5:latest", min_similarity=0.3):
+        """
+        RAG с локальной LLM (Ollama).
+        Retrieval — из локального индекса (эмбеддинги уже в store).
+        Генерация — через Ollama.
+        """
+        results = self.search(question, top_k=top_k, strategy=strategy)
+
+        if not results:
+            return {
+                "answer": "Не знаю — в индексе нет документов.",
+                "chunks_used": 0, "sources": [], "citations": [],
+                "dont_know": True,
+            }
+
+        max_sim = max(c.get("similarity", 0) for c in results)
+        if max_sim < min_similarity:
+            return {
+                "answer": f"Не знаю — максимальная релевантность ({max_sim:.3f}) ниже порога ({min_similarity}).",
+                "chunks_used": 0, "sources": [], "citations": [],
+                "dont_know": True, "max_similarity": max_sim,
+            }
+
+        # Контекст
+        context_parts = []
+        sources = []
+        for i, chunk in enumerate(results, 1):
+            source = chunk.get("source_file", "unknown")
+            sim = chunk.get("similarity", 0)
+            context_parts.append(
+                f"[Фрагмент {i}] (файл: {source}, релевантность: {sim:.4f})\n{chunk['text']}"
+            )
+            sources.append({
+                "file": source,
+                "title": chunk.get("title", ""),
+                "similarity": round(sim, 4),
+                "chunk_id": chunk.get("id"),
+            })
+
+        context_block = "\n\n---\n\n".join(context_parts)
+
+        system_prompt = (
+            "Ты — полезный ассистент. Используй ТОЛЬКО приведённый ниже контекст "
+            "для ответа на вопрос пользователя.\n\n"
+            "Ответ ОБЯЗАТЕЛЬНО верни в формате JSON со следующими полями:\n"
+            '  "answer": развёрнутый ответ на вопрос на основе контекста\n'
+            '  "citations": список из 1–3 коротких дословных цитат из фрагментов, '
+            'подтверждающих ответ\n'
+            '  "sources_used": список номеров фрагментов [1, 2, ...], которые ты использовал\n\n'
+            "Если в контексте нет нужной информации — верни строго:\n"
+            '{"answer": "Не знаю", "citations": [], "sources_used": []}\n\n'
+            "ВАЖНО: Ответь ТОЛЬКО JSON, без markdown-разметки, без ```json, без пояснений.\n\n"
+            f"Контекст:\n\n{context_block}"
+        )
+
+        # /no_think отключает thinking mode у qwen3
+        user_content = question + " /no_think" if "qwen" in ollama_model.lower() else question
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        raw, in_tok, out_tok = self._ollama_chat(messages, model=ollama_model)
+
+        # Парсим JSON из ответа Ollama
+        raw_clean = raw.strip()
+
+        # Убираем <think>...</think> блок (qwen3.5 thinking mode)
+        import re
+        raw_clean = re.sub(r'<think>.*?</think>', '', raw_clean, flags=re.DOTALL).strip()
+        # Если </think> без <think> — берём текст после
+        if "</think>" in raw_clean:
+            raw_clean = raw_clean.split("</think>")[-1].strip()
+        # Незакрытый <think> — модель обрезана на лимите, удаляем всё от <think>
+        if "<think>" in raw_clean and "</think>" not in raw_clean:
+            raw_clean = raw_clean.split("<think>")[0].strip()
+
+        # Убираем markdown code blocks
+        if raw_clean.startswith("```"):
+            lines = raw_clean.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            raw_clean = "\n".join(lines).strip()
+
+        # Извлекаем JSON если он где-то внутри текста
+        json_match = re.search(r'\{[^{}]*"answer"[^{}]*\}', raw_clean, re.DOTALL)
+        if json_match:
+            raw_clean = json_match.group(0)
+
+        try:
+            parsed = _json.loads(raw_clean)
+            answer = parsed.get("answer", raw_clean)
+            citations = parsed.get("citations", [])
+            sources_used_nums = parsed.get("sources_used", [])
+        except (_json.JSONDecodeError, AttributeError):
+            answer = raw_clean
+            citations = []
+            sources_used_nums = []
+
+        used_sources = []
+        if sources_used_nums:
+            for idx in sources_used_nums:
+                if isinstance(idx, int) and 1 <= idx <= len(sources):
+                    used_sources.append(sources[idx - 1])
+        if not used_sources:
+            used_sources = sources
+
+        dont_know = not citations and not sources_used_nums and "не знаю" in answer.lower()
+
+        return {
+            "answer": answer,
+            "chunks_used": len(results),
+            "sources": used_sources,
+            "citations": citations,
+            "dont_know": dont_know,
+            "tokens": {"input": in_tok, "output": out_tok},
+        }
+
+    def ask_local_no_rag(self, question, ollama_model="qwen3.5:latest"):
+        """Ответ локальной LLM БЕЗ RAG — только собственные знания модели."""
+        user_content = question + " /no_think" if "qwen" in ollama_model.lower() else question
+        messages = [
+            {"role": "system", "content": "Ты — полезный ассистент. Отвечай точно и по существу."},
+            {"role": "user", "content": user_content},
+        ]
+        raw, in_tok, out_tok = self._ollama_chat(messages, model=ollama_model)
+
+        # Убираем <think>...</think>
+        import re
+        clean = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
+        if "</think>" in clean:
+            clean = clean.split("</think>")[-1].strip()
+
+        return {
+            "answer": clean,
+            "chunks_used": 0,
+            "sources": [],
+            "tokens": {"input": in_tok, "output": out_tok},
         }
 
     def get_stats(self):

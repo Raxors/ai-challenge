@@ -22,6 +22,7 @@ PYTHONPATH=. python3 tests/test_memory_layers.py   # requires OPENAI_API_KEY (ma
 PYTHONPATH=. python3 tests/test_indexing.py        # chunkers, store, embedder serialization
 PYTHONPATH=. python3 tests/test_indexing_demo.py   # full demo: index PDF + search (requires OPENAI_API_KEY)
 PYTHONPATH=. python3 tests/test_rag_comparison.py  # RAG vs No-RAG benchmark (requires OPENAI_API_KEY)
+PYTHONPATH=. python3 tests/test_local_rag.py       # Local RAG (Ollama) vs Cloud RAG (requires ollama running)
 ```
 
 Tests use a custom `main()` runner with `check()` assertions — not unittest/pytest. Each test file is run directly with `PYTHONPATH=.` set.
@@ -70,6 +71,15 @@ Each MCP server is a standalone JSON-RPC 2.0 process (stdio transport). All shar
 | filesaver_mcp | `filesaver_mcp/` | Save text to `pipeline_output/` |
 | pipeline_mcp | `pipeline_mcp/` | Pipeline orchestrator (calls other 3 servers via MCPClient) |
 | indexing_mcp | `indexing_mcp/` | Document indexing + RAG (PDF/MD/TXT → chunks → embeddings → search/ask) |
+
+### Local RAG (Ollama)
+
+The pipeline supports fully local RAG via Ollama:
+- **LLM**: `llm/ollama_model.py` — Ollama chat/generate wrapper (implements `LLMModel`)
+- **Embeddings**: `indexing/ollama_embedder.py` — local embeddings via `nomic-embed-text` (768 dims)
+- **Pipeline methods**: `ask_local()`, `ask_local_no_rag()` in `indexing/pipeline.py`
+- **Requirements**: `ollama serve` running with `qwen3.5` and `nomic-embed-text` models
+- Qwen3 thinking mode disabled via assistant message prefill (`<think>\n</think>`)
 
 The agent itself also orchestrates MCP servers — it sees all tools and chains calls based on user intent.
 
