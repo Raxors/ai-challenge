@@ -478,17 +478,24 @@ class IndexingPipeline:
     # ── Локальные методы (Ollama) ─────────────────────────
 
     def _ollama_chat(self, messages, model="qwen3.5:latest", max_tokens=1024,
-                     base_url="http://localhost:11434"):
+                     base_url="http://localhost:11434", options=None):
         """Вызов Ollama /api/chat. Возвращает (text, input_tokens, output_tokens)."""
+        # Дефолтные параметры
+        default_opts = {"num_predict": max_tokens, "temperature": 0.3}
+        # Переопределение пользовательскими параметрами
+        if options:
+            default_opts.update(options)
         payload = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "options": {"num_predict": max_tokens, "temperature": 0.3},
+            "options": default_opts,
         }
         # Qwen3.5 тратит токены на <think>, даём больше места
         if "qwen" in model.lower():
-            payload["options"]["num_predict"] = max(max_tokens, 2048)
+            payload["options"]["num_predict"] = max(
+                payload["options"].get("num_predict", max_tokens), 2048
+            )
         # Для qwen: добавляем пустой think-блок чтобы пропустить thinking mode
         if "qwen" in model.lower():
             messages = list(messages)  # copy
@@ -610,6 +617,130 @@ class IndexingPipeline:
             used_sources = sources
 
         dont_know = not citations and not sources_used_nums and "не знаю" in answer.lower()
+
+        return {
+            "answer": answer,
+            "chunks_used": len(results),
+            "sources": used_sources,
+            "citations": citations,
+            "dont_know": dont_know,
+            "tokens": {"input": in_tok, "output": out_tok},
+        }
+
+    def ask_local_optimized(self, question, top_k=5, strategy=None,
+                            ollama_model="qwen3.5:latest", min_similarity=0.3,
+                            ollama_options=None):
+        """
+        Оптимизированный локальный RAG.
+        Отличия от ask_local():
+          - Plain text вместо JSON (меньше overhead, надёжнее парсинг)
+          - Оптимизированный промпт с few-shot примером
+          - Настраиваемые Ollama-параметры через ollama_options
+        """
+        results = self.search(question, top_k=top_k, strategy=strategy)
+
+        if not results:
+            return {
+                "answer": "Не знаю — в индексе нет документов.",
+                "chunks_used": 0, "sources": [], "citations": [],
+                "dont_know": True,
+            }
+
+        max_sim = max(c.get("similarity", 0) for c in results)
+        if max_sim < min_similarity:
+            return {
+                "answer": f"Не знаю — максимальная релевантность ({max_sim:.3f}) ниже порога.",
+                "chunks_used": 0, "sources": [], "citations": [],
+                "dont_know": True, "max_similarity": max_sim,
+            }
+
+        # Компактный контекст — только текст + номер, без лишних метаданных
+        context_parts = []
+        sources = []
+        for i, chunk in enumerate(results, 1):
+            source = chunk.get("source_file", "unknown")
+            sim = chunk.get("similarity", 0)
+            context_parts.append(f"[{i}] {chunk['text']}")
+            sources.append({
+                "file": source,
+                "title": chunk.get("title", ""),
+                "similarity": round(sim, 4),
+                "chunk_id": chunk.get("id"),
+            })
+
+        context_block = "\n\n".join(context_parts)
+
+        # Оптимизированный промпт: plain text, компактные инструкции, few-shot
+        system_prompt = (
+            "Ты — эксперт по машинному обучению. Отвечай ТОЛЬКО на основе контекста ниже.\n"
+            "Дай подробный ответ (3-5 предложений), упоминая ключевые термины и определения.\n\n"
+            "Формат ответа:\n"
+            "ОТВЕТ: <подробный ответ с терминами и определениями>\n"
+            "ЦИТАТЫ: <1-2 прямые цитаты из контекста в кавычках>\n"
+            "ИСТОЧНИКИ: <номера фрагментов через запятую>\n\n"
+            "Если в контексте нет ответа, напиши только: ОТВЕТ: Не знаю\n\n"
+            "Пример:\n"
+            "ОТВЕТ: Градиентный спуск — это метод оптимизации, который итеративно "
+            "обновляет параметры модели в направлении уменьшения функции потерь. "
+            "На каждом шаге вычисляется градиент и веса корректируются пропорционально "
+            "learning rate. Это основной метод обучения нейронных сетей.\n"
+            'ЦИТАТЫ: "итеративно обновляет веса в направлении, противоположном градиенту"\n'
+            "ИСТОЧНИКИ: 1, 3\n\n"
+            f"Контекст:\n{context_block}"
+        )
+
+        user_content = question
+        if "qwen" in ollama_model.lower():
+            user_content += " /no_think"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        raw, in_tok, out_tok = self._ollama_chat(
+            messages, model=ollama_model, options=ollama_options,
+        )
+
+        # Парсим plain text формат
+        import re
+        raw_clean = raw.strip()
+        raw_clean = re.sub(r'<think>.*?</think>', '', raw_clean, flags=re.DOTALL).strip()
+        if "</think>" in raw_clean:
+            raw_clean = raw_clean.split("</think>")[-1].strip()
+        if "<think>" in raw_clean and "</think>" not in raw_clean:
+            raw_clean = raw_clean.split("<think>")[0].strip()
+
+        # Парсинг ОТВЕТ/ЦИТАТЫ/ИСТОЧНИКИ
+        answer = raw_clean
+        citations = []
+        sources_used_nums = []
+
+        answer_match = re.search(r'ОТВЕТ:\s*(.*?)(?=\nЦИТАТЫ:|\nИСТОЧНИКИ:|\Z)',
+                                 raw_clean, re.DOTALL)
+        if answer_match:
+            answer = answer_match.group(1).strip()
+
+        cite_match = re.search(r'ЦИТАТЫ:\s*(.*?)(?=\nИСТОЧНИКИ:|\Z)', raw_clean, re.DOTALL)
+        if cite_match:
+            cite_text = cite_match.group(1).strip()
+            citations = re.findall(r'"([^"]+)"', cite_text)
+            if not citations:
+                citations = [c.strip() for c in cite_text.split('\n') if c.strip()]
+
+        src_match = re.search(r'ИСТОЧНИКИ:\s*(.*)', raw_clean)
+        if src_match:
+            nums = re.findall(r'\d+', src_match.group(1))
+            sources_used_nums = [int(n) for n in nums]
+
+        used_sources = []
+        for idx in sources_used_nums:
+            if 1 <= idx <= len(sources):
+                used_sources.append(sources[idx - 1])
+        if not used_sources:
+            used_sources = sources[:3]
+
+        dont_know = "не знаю" in answer.lower()
 
         return {
             "answer": answer,

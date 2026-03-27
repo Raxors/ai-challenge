@@ -23,6 +23,7 @@ PYTHONPATH=. python3 tests/test_indexing.py        # chunkers, store, embedder s
 PYTHONPATH=. python3 tests/test_indexing_demo.py   # full demo: index PDF + search (requires OPENAI_API_KEY)
 PYTHONPATH=. python3 tests/test_rag_comparison.py  # RAG vs No-RAG benchmark (requires OPENAI_API_KEY)
 PYTHONPATH=. python3 tests/test_local_rag.py       # Local RAG (Ollama) vs Cloud RAG (requires ollama running)
+PYTHONPATH=. python3 tests/test_optimization.py    # LLM optimization benchmark (params, models, prompts)
 ```
 
 Tests use a custom `main()` runner with `check()` assertions — not unittest/pytest. Each test file is run directly with `PYTHONPATH=.` set.
@@ -80,6 +81,8 @@ The pipeline supports fully local RAG via Ollama:
 - **Pipeline methods**: `ask_local()`, `ask_local_no_rag()` in `indexing/pipeline.py`
 - **Requirements**: `ollama serve` running with `qwen3.5` and `nomic-embed-text` models
 - Qwen3 thinking mode disabled via assistant message prefill (`<think>\n</think>`)
+- Optimized method `ask_local_optimized()` with plain text prompt, few-shot example, tunable Ollama options
+- Optimal params: temperature=0.1, num_predict=512, num_ctx=4096, top_p=0.8, repeat_penalty=1.2
 
 The agent itself also orchestrates MCP servers — it sees all tools and chains calls based on user intent.
 
