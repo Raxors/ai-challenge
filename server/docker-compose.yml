@@ -1,0 +1,42 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    # GPU support (uncomment for NVIDIA GPU):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  api:
+    build: .
+    container_name: llm-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: llm-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
