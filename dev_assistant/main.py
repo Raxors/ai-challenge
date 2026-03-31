@@ -1,8 +1,8 @@
 """
-Ассистент разработчика с RAG + Git MCP.
+Ассистент разработчика с RAG + Git.
 
 Индексирует README.md и docs/ для ответов на вопросы о проекте.
-Подключается к git_mcp для получения информации о репозитории.
+Использует git для получения информации о репозитории.
 
 Команды:
   /help <вопрос>  — задать вопрос о проекте (RAG + git-контекст)
@@ -14,31 +14,32 @@
 
 import os
 import sys
-import json
-import subprocess
 import textwrap
+import readline
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Корень проекта — на уровень выше от папки dev_assistant/
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-# ── RAG ──────────────────────────────────────────────────
-from indexing.pipeline import IndexingPipeline
+# Добавляем корень проекта в sys.path чтобы dev_assistant был доступен как пакет
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from dev_assistant.indexing.pipeline import IndexingPipeline
+from dev_assistant.git_tools import (
+    git_branch,
+    git_branches,
+    git_status,
+    git_log,
+    git_diff,
+    git_list_files,
+)
 
 DB_PATH = os.path.join(PROJECT_ROOT, "dev_assistant_index.db")
-
-# ── Git MCP (вызов напрямую без полного MCP-протокола) ───
-sys.path.insert(0, PROJECT_ROOT)
-from git_mcp.git_mcp_server import (
-    _git_branch,
-    _git_branches,
-    _git_status,
-    _git_log,
-    _git_diff,
-    _git_list_files,
-)
+HISTORY_FILE = os.path.join(os.path.dirname(__file__), ".dev_history")
 
 
 def get_width():
@@ -60,19 +61,12 @@ def index_docs(pipeline):
     """Индексировать README.md, CLAUDE.md и docs/."""
     files = []
 
-    # README.md
-    readme = os.path.join(PROJECT_ROOT, "README.md")
-    if os.path.exists(readme):
-        with open(readme, "r", encoding="utf-8") as f:
-            files.append((readme, f.read()))
+    for name in ("README.md", "CLAUDE.md"):
+        path = os.path.join(PROJECT_ROOT, name)
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                files.append((path, f.read()))
 
-    # CLAUDE.md
-    claude_md = os.path.join(PROJECT_ROOT, "CLAUDE.md")
-    if os.path.exists(claude_md):
-        with open(claude_md, "r", encoding="utf-8") as f:
-            files.append((claude_md, f.read()))
-
-    # docs/
     docs_dir = os.path.join(PROJECT_ROOT, "docs")
     if os.path.isdir(docs_dir):
         scanned = pipeline.scan_directory(docs_dir)
@@ -91,13 +85,12 @@ def get_git_context():
     """Собрать контекст из git для обогащения ответов."""
     parts = []
     try:
-        branch = _git_branch()
-        parts.append(f"Текущая ветка: {branch}")
+        parts.append(f"Текущая ветка: {git_branch()}")
     except Exception:
         parts.append("Git: не удалось получить ветку")
 
     try:
-        status = _git_status()
+        status = git_status()
         if status:
             parts.append(f"Изменённые файлы:\n{status}")
         else:
@@ -106,26 +99,25 @@ def get_git_context():
         pass
 
     try:
-        log = _git_log(5)
+        log = git_log(5)
         if log:
             parts.append(f"Последние коммиты:\n{log}")
     except Exception:
         pass
 
     try:
-        file_list = _git_list_files()
+        file_list = git_list_files()
         if file_list:
-            files = file_list.split("\n")
-            # Группируем по папкам верхнего уровня
+            all_files = file_list.split("\n")
             dirs = set()
             root_files = []
-            for f in files:
+            for f in all_files:
                 if "/" in f:
                     dirs.add(f.split("/")[0] + "/")
                 else:
                     root_files.append(f)
             structure = sorted(dirs) + sorted(root_files)
-            parts.append(f"Структура проекта ({len(files)} файлов):\n" + "\n".join(structure))
+            parts.append(f"Структура проекта ({len(all_files)} файлов):\n" + "\n".join(structure))
     except Exception:
         pass
 
@@ -142,14 +134,11 @@ def handle_help(question, pipeline):
         print("  /help Какая структура проекта?")
         return
 
-    # Собираем git-контекст
     git_context = get_git_context()
 
-    # Ищем в RAG
     results = pipeline.search(question, top_k=5)
     has_docs = bool(results) and max(c.get("similarity", 0) for c in results) > 0.25
 
-    # Формируем контекст из чанков
     doc_context = ""
     sources = []
     if has_docs:
@@ -162,7 +151,6 @@ def handle_help(question, pipeline):
             sources.append(f"  {os.path.basename(source)} (сходство: {sim:.3f})")
         doc_context = "\n\n---\n\n".join(doc_parts)
 
-    # Формируем промпт для LLM
     system_prompt = (
         "Ты — ассистент разработчика. Отвечай на вопросы о проекте, "
         "используя предоставленную документацию и информацию о репозитории.\n\n"
@@ -174,7 +162,6 @@ def handle_help(question, pipeline):
 
     system_prompt += f"Информация о репозитории:\n\n{git_context}"
 
-    # Вызываем LLM
     from openai import OpenAI
     client = OpenAI()
 
@@ -206,18 +193,18 @@ def handle_help(question, pipeline):
 def handle_git():
     """Показать git-информацию."""
     try:
-        print(f"\n  Ветка: {_git_branch()}")
+        print(f"\n  Ветка: {git_branch()}")
     except Exception as e:
         print(f"  Ошибка: {e}")
 
     try:
-        branches = _git_branches()
+        branches = git_branches()
         print(f"\n  Все ветки:\n{branches}")
     except Exception:
         pass
 
     try:
-        status = _git_status()
+        status = git_status()
         if status:
             print(f"\n  Статус:\n{status}")
         else:
@@ -226,7 +213,7 @@ def handle_git():
         pass
 
     try:
-        log = _git_log(5)
+        log = git_log(5)
         print(f"\n  Последние коммиты:\n{log}")
     except Exception:
         pass
@@ -235,12 +222,16 @@ def handle_git():
 def main():
     print("=" * 60)
     print("  Ассистент разработчика")
-    print("  RAG + Git MCP")
+    print("  RAG + Git")
     print("=" * 60)
+
+    # История команд (стрелки вверх/вниз)
+    readline.set_history_length(500)
+    if os.path.exists(HISTORY_FILE):
+        readline.read_history_file(HISTORY_FILE)
 
     pipeline = IndexingPipeline(db_path=DB_PATH)
 
-    # Автоматическая индексация при первом запуске
     stats_list = pipeline.get_stats()
     total_chunks = sum(s.get("chunks", 0) for s in stats_list)
     total_files = sum(s.get("files", 0) for s in stats_list)
@@ -250,10 +241,8 @@ def main():
     else:
         print(f"\nИндекс: {total_chunks} чанков, {total_files} файлов")
 
-    # Показываем git-контекст
     try:
-        branch = _git_branch()
-        print(f"Git: ветка '{branch}'")
+        print(f"Git: ветка '{git_branch()}'")
     except Exception:
         print("Git: не удалось подключиться")
 
@@ -303,9 +292,9 @@ def main():
             handle_help(question, pipeline)
             continue
 
-        # Если не команда — тоже обрабатываем как вопрос
         handle_help(user_input, pipeline)
 
+    readline.write_history_file(HISTORY_FILE)
     pipeline.close()
 
 
