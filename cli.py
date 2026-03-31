@@ -147,7 +147,7 @@ def print_help():
   state step <text> [| expected action] — установить текущий шаг
   state pause       — приостановить задачу
   state resume      — возобновить задачу
-  state clear       — очистить состояние задачи
+  state clear       — очистить состояние задачи/
   state history     — показать историю переходов
 
   Инварианты проекта (жёсткие ограничения):
