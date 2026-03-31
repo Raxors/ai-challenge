@@ -55,3 +55,18 @@ def git_list_files(directory=None):
     if directory:
         return _run_git("ls-files", directory)
     return _run_git("ls-files")
+
+
+def git_diff_branch(base="main"):
+    """Diff текущей ветки относительно базовой."""
+    return _run_git("diff", f"{base}...HEAD")
+
+
+def git_changed_files(base="main"):
+    """Список изменённых файлов относительно базовой ветки."""
+    return _run_git("diff", "--name-only", f"{base}...HEAD")
+
+
+def git_show_file(path, ref="HEAD"):
+    """Содержимое файла из определённого коммита."""
+    return _run_git("show", f"{ref}:{path}")

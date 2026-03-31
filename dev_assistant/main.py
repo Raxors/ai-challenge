@@ -6,6 +6,8 @@
 
 Команды:
   /help <вопрос>  — задать вопрос о проекте (RAG + git-контекст)
+  /review [base]  — AI code review текущей ветки (default base: main)
+  /docs [file]    — сгенерировать документацию (или сохранить в file)
   /index          — переиндексировать документацию
   /stats          — статистика индекса
   /git            — показать текущую ветку и статус
@@ -248,6 +250,8 @@ def main():
 
     print("\nКоманды:")
     print("  /help <вопрос>  — спросить о проекте")
+    print("  /review [base]  — AI code review (default: main)")
+    print("  /docs [file]    — сгенерировать документацию проекта")
     print("  /index          — переиндексировать документацию")
     print("  /stats          — статистика индекса")
     print("  /git            — информация о репозитории")
@@ -267,6 +271,45 @@ def main():
         if user_input.lower() == "exit":
             print("Выход.")
             break
+
+        if user_input.lower().startswith("/docs"):
+            parts = user_input.split()
+            output_file = parts[1] if len(parts) > 1 else None
+            from dev_assistant.docs_gen import generate_docs
+            print("\n  Сканирую проект и генерирую документацию...")
+            try:
+                result = generate_docs(pipeline=pipeline)
+                width = get_width()
+                if output_file:
+                    with open(output_file, "w", encoding="utf-8") as f:
+                        f.write(result["docs"])
+                    print(f"  Документация сохранена в {output_file}")
+                else:
+                    print()
+                    print_wrapped(result["docs"], width)
+                scanned = result["files_scanned"]
+                t = result["tokens"]
+                print(f"\n  Файлов: код={scanned['code']}, конфиги={scanned['config']}, доки={scanned['docs']}")
+                print(f"  Токены: {t['input']} вход / {t['output']} выход")
+            except Exception as e:
+                print(f"  Ошибка: {e}")
+            continue
+
+        if user_input.lower().startswith("/review"):
+            parts = user_input.split()
+            base = parts[1] if len(parts) > 1 else "main"
+            from dev_assistant.review import run_review
+            print(f"\n  Анализирую изменения (vs {base})...")
+            try:
+                result = run_review(base=base, pipeline=pipeline)
+                width = get_width()
+                print()
+                print_wrapped(result["review"], width)
+                t = result["tokens"]
+                print(f"\n  Токены: {t['input']} вход / {t['output']} выход")
+            except Exception as e:
+                print(f"  Ошибка: {e}")
+            continue
 
         if user_input.lower() == "/index":
             index_docs(pipeline)
