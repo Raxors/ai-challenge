@@ -1,0 +1,96 @@
+[
+    {
+        "id": "TK-001",
+        "user_id": 1,
+        "subject": "Не работает авторизация через Google OAuth",
+        "description": "При попытке войти через Google получаю ошибку 'redirect_uri_mismatch'. Пробовал разные браузеры.",
+        "status": "open",
+        "priority": "high",
+        "category": "auth",
+        "created": "2026-04-01T10:30:00",
+        "updated": "2026-04-01T14:00:00",
+        "tags": ["oauth", "google", "login"],
+        "history": [
+            {"timestamp": "2026-04-01T10:30:00", "action": "created", "note": "Пользователь создал тикет"},
+            {"timestamp": "2026-04-01T14:00:00", "action": "escalated", "note": "Эскалировано в команду auth"}
+        ]
+    },
+    {
+        "id": "TK-002",
+        "user_id": 2,
+        "subject": "Не приходит письмо для сброса пароля",
+        "description": "Нажимаю 'Забыли пароль?', ввожу email maria@example.com, но письмо не приходит уже 2 часа. Проверила спам.",
+        "status": "open",
+        "priority": "medium",
+        "category": "auth",
+        "created": "2026-04-01T15:00:00",
+        "updated": "2026-04-01T15:00:00",
+        "tags": ["password-reset", "email"],
+        "history": [
+            {"timestamp": "2026-04-01T15:00:00", "action": "created", "note": "Пользователь создал тикет"}
+        ]
+    },
+    {
+        "id": "TK-003",
+        "user_id": 3,
+        "subject": "API возвращает 429 Too Many Requests",
+        "description": "С утра наш сервис получает 429 от API. Лимиты по плану Enterprise — 10000 req/min. Текущее потребление ~5000 req/min. Dashboard показывает нормальный расход.",
+        "status": "in_progress",
+        "priority": "critical",
+        "category": "api",
+        "created": "2026-04-02T08:00:00",
+        "updated": "2026-04-02T09:30:00",
+        "tags": ["api", "rate-limit", "429"],
+        "history": [
+            {"timestamp": "2026-04-02T08:00:00", "action": "created", "note": "Пользователь создал тикет"},
+            {"timestamp": "2026-04-02T08:15:00", "action": "assigned", "note": "Назначено команде API"},
+            {"timestamp": "2026-04-02T09:30:00", "action": "comment", "note": "Ведётся расследование на стороне инфраструктуры"}
+        ]
+    },
+    {
+        "id": "TK-004",
+        "user_id": 4,
+        "subject": "Аккаунт заблокирован без предупреждения",
+        "description": "Мой аккаунт olga@example.com показывает статус 'suspended'. Я не получала никаких уведомлений. Подписка Pro оплачена до мая.",
+        "status": "open",
+        "priority": "high",
+        "category": "billing",
+        "created": "2026-04-01T18:00:00",
+        "updated": "2026-04-01T18:00:00",
+        "tags": ["suspended", "account", "billing"],
+        "history": [
+            {"timestamp": "2026-04-01T18:00:00", "action": "created", "note": "Пользователь создал тикет"}
+        ]
+    },
+    {
+        "id": "TK-005",
+        "user_id": 5,
+        "subject": "Как подключить вебхуки?",
+        "description": "Хочу получать уведомления о событиях через webhook. В документации не нашёл инструкцию. На бесплатном плане это доступно?",
+        "status": "open",
+        "priority": "low",
+        "category": "general",
+        "created": "2026-04-02T11:00:00",
+        "updated": "2026-04-02T11:00:00",
+        "tags": ["webhook", "integration", "free-plan"],
+        "history": [
+            {"timestamp": "2026-04-02T11:00:00", "action": "created", "note": "Пользователь создал тикет"}
+        ]
+    },
+    {
+        "id": "TK-006",
+        "user_id": 1,
+        "subject": "Двухфакторная аутентификация не принимает код",
+        "description": "После смены телефона коды из Google Authenticator не подходят. Резервные коды тоже потерял.",
+        "status": "open",
+        "priority": "high",
+        "category": "auth",
+        "created": "2026-03-25T09:00:00",
+        "updated": "2026-03-26T10:00:00",
+        "tags": ["2fa", "authenticator", "recovery"],
+        "history": [
+            {"timestamp": "2026-03-25T09:00:00", "action": "created", "note": "Пользователь создал тикет"},
+            {"timestamp": "2026-03-26T10:00:00", "action": "comment", "note": "Запрошена верификация личности через email"}
+        ]
+    }
+]

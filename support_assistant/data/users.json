@@ -1,0 +1,57 @@
+[
+    {
+        "id": 1,
+        "name": "Алексей Петров",
+        "email": "alex@example.com",
+        "plan": "pro",
+        "registered": "2025-06-15",
+        "last_login": "2026-04-01",
+        "status": "active",
+        "two_factor": true,
+        "api_key_active": true
+    },
+    {
+        "id": 2,
+        "name": "Мария Иванова",
+        "email": "maria@example.com",
+        "plan": "free",
+        "registered": "2026-01-10",
+        "last_login": "2026-03-28",
+        "status": "active",
+        "two_factor": false,
+        "api_key_active": false
+    },
+    {
+        "id": 3,
+        "name": "Дмитрий Сидоров",
+        "email": "dmitry@example.com",
+        "plan": "enterprise",
+        "registered": "2024-11-20",
+        "last_login": "2026-04-02",
+        "status": "active",
+        "two_factor": true,
+        "api_key_active": true
+    },
+    {
+        "id": 4,
+        "name": "Ольга Козлова",
+        "email": "olga@example.com",
+        "plan": "pro",
+        "registered": "2025-09-03",
+        "last_login": "2026-02-14",
+        "status": "suspended",
+        "two_factor": false,
+        "api_key_active": false
+    },
+    {
+        "id": 5,
+        "name": "Иван Новиков",
+        "email": "ivan@example.com",
+        "plan": "free",
+        "registered": "2026-03-01",
+        "last_login": "2026-04-01",
+        "status": "active",
+        "two_factor": false,
+        "api_key_active": false
+    }
+]
